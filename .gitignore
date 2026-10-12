@@ -1,0 +1,8 @@
+# Financial source data stays in the private Google Sheet.
+data.js
+*.xlsx
+*.xls
+*.csv
+config.local.js
+.DS_Store
+Thumbs.db
