@@ -6,6 +6,8 @@
   const signIn = document.querySelector('#google-signin');
   let accessToken = null;
   let tokenClient = null;
+  let dbMetadata = null;
+  const planHeaders = ['record_id','scope_id','plan_name','saved_at','volume_pct','price_pct','raw_material_pct','labor_pct','fixed_cost_pct','initiatives_json'];
 
   function setMessage(text, error = false) {
     message.textContent = text;
@@ -80,19 +82,58 @@
   }
 
   async function sheetValues(range) {
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}`;
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}?valueRenderOption=UNFORMATTED_VALUE`;
     const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Google Sheets API ตอบกลับ ${response.status}`);
     return body.values || [];
   }
 
+  async function spreadsheetRequest(suffix = '', options = {}) {
+    const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(config.spreadsheetId)}${suffix}`, {
+      ...options,
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Google Sheets API ตอบกลับ ${response.status}`);
+    return body;
+  }
+
+  async function readMetadata() {
+    const fields = 'spreadsheetId,properties(title),sheets(properties(sheetId,title,hidden,gridProperties(rowCount,columnCount)))';
+    dbMetadata = await spreadsheetRequest(`?fields=${encodeURIComponent(fields)}`);
+    return dbMetadata;
+  }
+
+  function quoted(name) { return "'" + name.replaceAll("'", "''") + "'"; }
+
+  async function ensurePlanLog() {
+    // Creating the history tab is triggered only by the user's Save action.
+    await readMetadata();
+    if (!dbMetadata.sheets.some(s => s.properties.title === 'business_plans')) {
+      try {
+        await spreadsheetRequest(':batchUpdate', {method:'POST',body:JSON.stringify({requests:[{addSheet:{properties:{title:'business_plans',gridProperties:{rowCount:1000,columnCount:10,frozenRowCount:1}}}}]})});
+      } catch (error) {
+        // Another editor may have created it while this request was running.
+        await readMetadata();
+        if (!dbMetadata.sheets.some(s => s.properties.title === 'business_plans')) throw error;
+      }
+    }
+    const rows = await sheetValues("'business_plans'!A1:J1");
+    if (!rows.length || rows[0].every(v => v === '' || v === null)) {
+      await spreadsheetRequest(`/values/${encodeURIComponent("'business_plans'!A1:J1")}?valueInputOption=RAW`, {method:'PUT',body:JSON.stringify({values:[planHeaders]})});
+    } else if (planHeaders.some((header,i) => rows[0][i] !== header)) {
+      throw new Error('หัวตาราง business_plans ไม่ตรงกับรูปแบบประวัติแผน กรุณาตรวจแท็บก่อนบันทึก');
+    }
+  }
+
   async function appendPlan(scopeId, plan) {
+    await ensurePlanLog();
     const range = encodeURIComponent('business_plans!A:J');
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(config.spreadsheetId)}/values/${range}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
     const savedAt = plan.savedAt || new Date().toISOString();
     const row = [
-      `${scopeId}-${Date.now()}-${crypto.randomUUID()}`, scopeId, 'Business Plan', savedAt,
+      `${scopeId}-${Date.now()}-${crypto.randomUUID()}`, scopeId, `Business Plan ${window.PL_DATA.year}`, savedAt,
       plan.assumptions.volume, plan.assumptions.price, plan.assumptions.raw,
       plan.assumptions.labor, plan.assumptions.fixed, JSON.stringify(plan.initiatives || []),
     ];
@@ -131,11 +172,46 @@
     return rows.slice(1).map(row => Object.fromEntries(Object.entries(headers).map(([key, index]) => [key, row[index] ?? ''])));
   }
 
+  function savedPlans(planRows, year) {
+    const plans = toObjects(planRows).filter(plan => {
+      const planYear = String(plan.plan_name).match(/\b(20\d{2})\b/)?.[1];
+      return planYear ? Number(planYear) === year : year === 2022;
+    }).sort((a,b) => String(a.saved_at).localeCompare(String(b.saved_at)));
+    const savedByScope = {};
+    for (const plan of plans) {
+      let initiatives = [];
+      try { initiatives = JSON.parse(plan.initiatives_json || '[]'); } catch { initiatives = []; }
+      savedByScope[plan.scope_id] = {savedAt:plan.saved_at, assumptions:{volume:asNumber(plan.volume_pct)??0,price:asNumber(plan.price_pct)??0,raw:asNumber(plan.raw_material_pct)??0,labor:asNumber(plan.labor_pct)??0,fixed:asNumber(plan.fixed_cost_pct)??0}, initiatives:Array.isArray(initiatives)?initiatives:[]};
+    }
+    window.PL_SAVED_BY_SCOPE = savedByScope;
+  }
+
+  async function loadNativeDataset(metadata) {
+    const ranges = metadata.sheets.filter(s => ['BP บริษัท A','BP บริษัท A (PD)','Sale Price'].includes(s.properties.title)).map(({properties:p}) => {
+      const cols = Math.min(p.gridProperties.columnCount, p.title === 'Sale Price' ? 17 : 74);
+      return `${quoted(p.title)}!A1:${window.PL_WORKBOOK.columnName(cols-1)}${p.gridProperties.rowCount}`;
+    });
+    const query = new URLSearchParams({includeGridData:'true',fields:'sheets(properties(title),data(startRow,startColumn,rowData(values(effectiveValue))))'});
+    ranges.forEach(range => query.append('ranges',range));
+    const planSheet = metadata.sheets.find(s => s.properties.title === 'business_plans');
+    const [grid,planRows] = await Promise.all([
+      spreadsheetRequest('?' + query.toString()),
+      planSheet ? sheetValues(`'business_plans'!A1:J${planSheet.properties.gridProperties.rowCount}`) : Promise.resolve([]),
+    ]);
+    const dataset = window.PL_WORKBOOK.nativeDataset(metadata,grid.sheets || []);
+    savedPlans(planRows,dataset.year);
+    return dataset;
+  }
+
   async function loadDataset() {
+    const sheetMeta = await readMetadata();
+    const titles = sheetMeta.sheets.map(s => s.properties.title);
+    if (titles.some(name => ['BP บริษัท A','BP บริษัท A (PD)'].includes(name))) return loadNativeDataset(sheetMeta);
+    if (!titles.includes('pnl') || !titles.includes('accounts')) throw new Error('โครงสร้างชีตไม่ตรงกับตาราง P&L ที่เว็บรองรับ');
     const [pnlRows, accountRows, productRows, sourceRows, errorRows, planRows, metadataRows] = await Promise.all([
       sheetValues('pnl!A1:S'), sheetValues('accounts!A1:F'), sheetValues('products!A1:H'),
       sheetValues('source_sheets!A1:E'), sheetValues('source_errors!A1:C'),
-      sheetValues('business_plans!A1:J'), sheetValues('metadata!A1:B'),
+      titles.includes('business_plans') ? sheetValues('business_plans!A1:J') : Promise.resolve([]), sheetValues('metadata!A1:B'),
     ]);
     const records = toObjects(pnlRows);
     const accounts = toObjects(accountRows).map(a => ({
@@ -177,22 +253,7 @@
       });
     }
     const metadata = Object.fromEntries(toObjects(metadataRows).map(row => [row.key, row.value]));
-    const plans = toObjects(planRows).sort((a, b) => String(a.saved_at).localeCompare(String(b.saved_at)));
-    const savedByScope = {};
-    for (const plan of plans) {
-      let initiatives = [];
-      try { initiatives = JSON.parse(plan.initiatives_json || '[]'); } catch { initiatives = []; }
-      savedByScope[plan.scope_id] = {
-        savedAt: plan.saved_at,
-        assumptions: {
-          volume: asNumber(plan.volume_pct) ?? 0, price: asNumber(plan.price_pct) ?? 0,
-          raw: asNumber(plan.raw_material_pct) ?? 0, labor: asNumber(plan.labor_pct) ?? 0,
-          fixed: asNumber(plan.fixed_cost_pct) ?? 0,
-        },
-        initiatives: Array.isArray(initiatives) ? initiatives : [],
-      };
-    }
-    window.PL_SAVED_BY_SCOPE = savedByScope;
+    savedPlans(planRows,asNumber(metadata.fiscal_year) || 2022);
     return {
       source: metadata.source_file || 'Department P&L Database',
       year: asNumber(metadata.fiscal_year) || 2022,
