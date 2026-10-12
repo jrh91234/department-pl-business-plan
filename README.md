@@ -24,7 +24,7 @@
 2. ตั้ง OAuth consent screen เป็น External แบบ Testing และใส่บัญชี Google ที่อนุญาตเป็น Test users
 3. สร้าง OAuth Client ID ชนิด Web application และเพิ่ม Authorized JavaScript origin: `https://jrh91234.github.io`
 4. สร้าง API Key จำกัด HTTP referrers เป็น `https://jrh91234.github.io/*` และ `https://docs.google.com/*` และจำกัด API เป็น Google Picker API
-5. วาง OAuth Client ID, API Key และ Project Number ใน `site/config.js` แล้ว commit/push
+5. วาง OAuth Client ID, API Key และ Project Number ใน `site/pl-settings.js` แล้ว commit/push
 6. แชร์ Google Sheet ให้บัญชี Google ที่ใช้เข้าสู่ระบบเป็น Editor ห้ามตั้งสิทธิ์เป็น Anyone
 
 OAuth Client ID และ API Key ที่จำกัดโดเมนเป็นค่าระบุตัวแอปซึ่งแสดงในหน้าเว็บได้ ไม่ใช่ความลับ ห้ามใส่ client secret หรือ service-account key ในรีโพนี้ OAuth scope `drive.file` ใช้ร่วมกับ Google Picker เพื่อให้ผู้ใช้เลือกและอนุญาตเฉพาะไฟล์ฐานข้อมูลที่ตั้งค่าไว้
