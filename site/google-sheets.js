@@ -304,7 +304,7 @@
   }
 
   if (!config.googleClientId || !config.googleApiKey || !config.googleProjectNumber || !config.spreadsheetId) {
-    setMessage('ต้องตั้งค่า OAuth Client ID, API Key และ Project Number ใน config.js ก่อนใช้งาน');
+    setMessage('ต้องตั้งค่า OAuth Client ID, API Key และ Project Number ใน pl-settings.js ก่อนใช้งาน');
   } else {
     loadGoogleServices().then(() => {
       signIn.disabled = false;
