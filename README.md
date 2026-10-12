@@ -17,13 +17,14 @@ Google Sheet `Department P&L Database` มีแท็บหลักดัง�
 
 ## ตั้งค่า Google OAuth
 
-1. สร้างโปรเจกต์ใน Google Cloud Console และเปิดใช้ Google Sheets API
-2. ตั้ง OAuth consent screen เป็น External แบบ Testing และใส่อีเมล Google ของผู้ใช้ที่อนุญาตเป็น Test users
+1. สร้างโปรเจกต์ใน Google Cloud Console แล้วเปิดใช้ Google Sheets API, Google Drive API และ Google Picker API
+2. ตั้ง OAuth consent screen เป็น External แบบ Testing และใส่บัญชี Google ที่อนุญาตเป็น Test users
 3. สร้าง OAuth Client ID ชนิด Web application และเพิ่ม Authorized JavaScript origin: `https://jrh91234.github.io`
-4. วาง Client ID ใน `site/config.js` ที่ `googleClientId` แล้ว commit/push
-5. แชร์ Google Sheet ให้บัญชี Google ที่ใช้เข้าสู่ระบบเป็น Editor ห้ามตั้งสิทธิ์เป็น Anyone
+4. สร้าง API Key จำกัด HTTP referrers เป็น `https://jrh91234.github.io/*` และ `https://docs.google.com/*` และจำกัด API เป็น Google Picker API
+5. วาง OAuth Client ID, API Key และ Project Number ใน `site/config.js` แล้ว commit/push
+6. แชร์ Google Sheet ให้บัญชี Google ที่ใช้เข้าสู่ระบบเป็น Editor ห้ามตั้งสิทธิ์เป็น Anyone
 
-Google OAuth Client ID เป็นค่าระบุตัวแอปที่แสดงในหน้าเว็บได้ ไม่ใช่ client secret ห้ามใส่ client secret หรือ service-account key ในรีโพนี้ OAuth scope `spreadsheets` ให้แอปที่ผู้ใช้อนุญาตอ่านและเขียนสเปรดชีตในบัญชีนั้น ผู้ใช้ควรอนุญาตเฉพาะแอปที่เชื่อถือได้ และเพิ่มเฉพาะบัญชีที่ต้องใช้เป็น Test users
+OAuth Client ID และ API Key ที่จำกัดโดเมนเป็นค่าระบุตัวแอปซึ่งแสดงในหน้าเว็บได้ ไม่ใช่ความลับ ห้ามใส่ client secret หรือ service-account key ในรีโพนี้ OAuth scope `drive.file` ใช้ร่วมกับ Google Picker เพื่อให้ผู้ใช้เลือกและอนุญาตเฉพาะไฟล์ฐานข้อมูลที่ตั้งค่าไว้
 
 ## เผยแพร่
 

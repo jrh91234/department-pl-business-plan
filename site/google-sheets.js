@@ -12,16 +12,26 @@
     message.classList.toggle('error', error);
   }
 
-  function loadIdentityServices() {
+  function loadScript(src) {
     return new Promise((resolve, reject) => {
-      if (window.google?.accounts?.oauth2) return resolve();
       const script = document.createElement('script');
-      script.src = 'https://accounts.google.com/gsi/client';
+      script.src = src;
       script.async = true;
       script.defer = true;
       script.onload = resolve;
-      script.onerror = () => reject(new Error('โหลด Google Identity Services ไม่สำเร็จ'));
+      script.onerror = () => reject(new Error('โหลดบริการ Google ไม่สำเร็จ'));
       document.head.appendChild(script);
+    });
+  }
+
+  async function loadGoogleServices() {
+    await Promise.all([
+      loadScript('https://accounts.google.com/gsi/client'),
+      loadScript('https://apis.google.com/js/api.js'),
+    ]);
+    await new Promise((resolve, reject) => {
+      try { window.gapi.load('picker', { callback: resolve }); }
+      catch (error) { reject(error); }
     });
   }
 
@@ -29,7 +39,7 @@
     return new Promise((resolve, reject) => {
       tokenClient = window.google.accounts.oauth2.initTokenClient({
         client_id: config.googleClientId,
-        scope: 'https://www.googleapis.com/auth/spreadsheets',
+        scope: 'https://www.googleapis.com/auth/drive.file',
         callback: response => {
           if (response.error) return reject(new Error(response.error_description || response.error));
           accessToken = response.access_token;
@@ -38,6 +48,34 @@
         error_callback: error => reject(new Error(error.message || 'เข้าสู่ระบบ Google ไม่สำเร็จ')),
       });
       tokenClient.requestAccessToken({ prompt: 'select_account' });
+    });
+  }
+
+  function selectDatabaseFile() {
+    return new Promise((resolve, reject) => {
+      const view = new window.google.picker.DocsView(window.google.picker.ViewId.SPREADSHEETS)
+        .setFileIds(config.spreadsheetId)
+        .setMimeTypes('application/vnd.google-apps.spreadsheet')
+        .setIncludeFolders(false)
+        .setSelectFolderEnabled(false)
+        .setMode(window.google.picker.DocsViewMode.LIST);
+      const picker = new window.google.picker.PickerBuilder()
+        .addView(view)
+        .setMaxItems(1)
+        .setLocale('th')
+        .setDeveloperKey(config.googleApiKey)
+        .setAppId(config.googleProjectNumber)
+        .setOAuthToken(accessToken)
+        .setCallback(data => {
+          if (data.action === window.google.picker.Action.PICKED) {
+            const selectedId = data.docs?.[0]?.id;
+            if (selectedId !== config.spreadsheetId) return reject(new Error('เลือกฐานข้อมูลที่ตั้งค่าไว้ไม่สำเร็จ'));
+            return resolve();
+          }
+          if (data.action === window.google.picker.Action.CANCEL) reject(new Error('ยกเลิกการเลือก Google Sheet'));
+        })
+        .build();
+      picker.setVisible(true);
     });
   }
 
@@ -181,6 +219,9 @@
     setMessage('กำลังเข้าสู่ระบบและอ่านข้อมูลจากชีต…');
     try {
       await requestAccessToken();
+      setMessage('เลือกฐานข้อมูล Department P&L Database ใน Google Drive…');
+      await selectDatabaseFile();
+      setMessage('กำลังอ่านข้อมูลจากชีต…');
       window.PL_DATA = await loadDataset();
       window.PL_DB = {
         connected: true,
@@ -201,12 +242,12 @@
     }
   }
 
-  if (!config.googleClientId || !config.spreadsheetId) {
-    setMessage('ต้องตั้งค่า Google OAuth Client ID และ Spreadsheet ID ใน config.js ก่อนใช้งาน');
+  if (!config.googleClientId || !config.googleApiKey || !config.googleProjectNumber || !config.spreadsheetId) {
+    setMessage('ต้องตั้งค่า OAuth Client ID, API Key และ Project Number ใน config.js ก่อนใช้งาน');
   } else {
-    loadIdentityServices().then(() => {
+    loadGoogleServices().then(() => {
       signIn.disabled = false;
-      setMessage('กดปุ่มเพื่อเข้าสู่ระบบด้วย Google Account ที่มีสิทธิ์แก้ไขชีต');
+      setMessage('เข้าสู่ระบบแล้วเลือกฐานข้อมูล Department P&L Database เพื่อให้สิทธิ์เฉพาะไฟล์นี้');
     }).catch(error => setMessage(error.message, true));
   }
   signIn.addEventListener('click', connect);
