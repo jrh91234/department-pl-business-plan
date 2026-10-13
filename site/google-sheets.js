@@ -83,11 +83,17 @@
     try { localStorage.removeItem(key); } catch { /* Private browsing may block storage. */ }
   }
 
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
   async function authenticatedFetch(url, options = {}) {
-    return fetch(url, {
-      ...options,
-      headers: { ...(options.headers || {}), Authorization: `Bearer ${accessToken}` },
-    });
+    // Sheets API allows ~60 read requests/min/user; back off on 429 instead of failing the whole load.
+    for (let attempt = 0; ; attempt++) {
+      const response = await fetch(url, {
+        ...options,
+        headers: { ...(options.headers || {}), Authorization: `Bearer ${accessToken}` },
+      });
+      if (response.status !== 429 || attempt >= 4) return response;
+      await wait(Math.min(2000 * 2 ** attempt, 30000));
+    }
   }
 
   function selectGoogleSheet(fileId, title) {
@@ -124,6 +130,15 @@
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Google Sheets API ตอบกลับ ${response.status}`);
     return body.values || [];
+  }
+
+  async function sheetBatchValues(ranges, spreadsheetId = config.spreadsheetId, valueRenderOption = 'UNFORMATTED_VALUE') {
+    const query = new URLSearchParams({valueRenderOption});
+    ranges.forEach(range => query.append('ranges', range));
+    const response = await authenticatedFetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchGet?${query.toString()}`);
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Google Sheets API ตอบกลับ ${response.status}`);
+    return (body.valueRanges || []).map(item => item.values || []);
   }
 
   async function spreadsheetRequest(suffix = '', options = {}, spreadsheetId = config.spreadsheetId) {
@@ -351,22 +366,20 @@
     if (!sheet) throw new Error(`ไม่พบแท็บ ${config.jobOrderSheetName} ใน ${metadata.properties?.title||'ไฟล์ต้นทาง'}`);
     const rowCount=Number(sheet.properties.gridProperties?.rowCount)||0;
     onProgress({percent:6,message:`พบข้อมูล ${new Intl.NumberFormat('th-TH').format(rowCount)} แถว กำลังอ่าน Log…`});
-    const chunkSize=1000,total=Math.max(1,Math.ceil(Math.max(1,rowCount)/chunkSize)),chunks=[];
+    // One batchGet request per group keeps the whole Log well under the per-minute read quota.
+    const chunkSize=5000,rangesPerRequest=10,total=Math.max(1,Math.ceil(Math.max(1,rowCount)/chunkSize)),chunks=[];
     for(let index=0;index<total;index++){
       const start=index*chunkSize+1,end=Math.min((index+1)*chunkSize,Math.max(rowCount,1));
-      chunks.push({range:`'${config.jobOrderSheetName.replaceAll("'","''")}'!A${start}:H${end}`});
+      chunks.push(`'${config.jobOrderSheetName.replaceAll("'","''")}'!A${start}:H${end}`);
     }
     const values=[];let completed=0;
-    for(let offset=0;offset<chunks.length;offset+=4){
-      const batch=chunks.slice(offset,offset+4);
-      const result=await Promise.all(batch.map(async chunk=>{
-        const part=await sheetValues(chunk.range,spreadsheetId,'FORMATTED_VALUE');
-        completed++;
-        const percent=Math.round(6+82*completed/total);
-        onProgress({percent,message:`กำลังอ่าน barcode record · Log ${new Intl.NumberFormat('th-TH').format(Math.min(completed*chunkSize,rowCount))}/${new Intl.NumberFormat('th-TH').format(rowCount)} แถว…`});
-        return part;
-      }));
-      result.forEach(part=>values.push(...part));
+    for(let offset=0;offset<chunks.length;offset+=rangesPerRequest){
+      const batch=chunks.slice(offset,offset+rangesPerRequest);
+      const parts=await sheetBatchValues(batch,spreadsheetId,'FORMATTED_VALUE');
+      parts.forEach(part=>values.push(...part));
+      completed+=batch.length;
+      const percent=Math.round(6+82*completed/total);
+      onProgress({percent,message:`กำลังอ่าน barcode record · Log ${new Intl.NumberFormat('th-TH').format(Math.min(completed*chunkSize,rowCount))}/${new Intl.NumberFormat('th-TH').format(rowCount)} แถว…`});
     }
     if (!values.length) throw new Error(`แท็บ ${config.jobOrderSheetName} ไม่มีแถวข้อมูล`);
     onProgress({percent:91,message:'กำลังใช้กฎกรองและจัดกลุ่มรายการผลิต…'});
