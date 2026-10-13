@@ -32,3 +32,6 @@
 @media(max-width:760px){.heading-actions{flex-wrap:wrap}.daily-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}.daily-source-note{align-items:flex-start;flex-direction:column;gap:6px}.daily-content-grid{gap:16px}.daily-notice{font-size:9px}}
 @media(max-width:420px){.filter input[type=date]{min-width:112px;font-size:10px}.daily-date-filter{width:100%;justify-content:flex-start;flex-wrap:wrap}.daily-date-filter input[type=date]{flex:1;min-width:112px}.daily-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.daily-kpi-grid .kpi{padding:13px 11px}.daily-kpi-grid .kpi-label{font-size:9px}.daily-kpi-grid .kpi-value{font-size:18px}.daily-kpi-grid .kpi-bottom{font-size:8px}}
 @media print{.daily-date-filter{display:none!important}}
+
+.price-match-note,.price-calculation-note{font-size:9px;line-height:1.55;overflow-wrap:anywhere}
+.price-calculation-note{color:#607789;margin-top:3px}

@@ -384,7 +384,7 @@
       document.querySelector('#refresh-data').hidden = false;
       document.querySelector('#connection-status').innerHTML = '<i></i>Google Sheets เชื่อมต่อแล้ว';
       const app = document.createElement('script');
-      app.src = 'app.js?v=20261013g';
+      app.src = 'app.js?v=20261013h';
       app.onerror = () => { gate.hidden = false; document.querySelector('#main').hidden = true; setMessage('เปิดหน้าเว็บไม่สำเร็จ ลองโหลดหน้าใหม่', true); };
       document.body.appendChild(app);
     } catch (error) {
