@@ -5,6 +5,7 @@
   const message = document.querySelector('#connect-message');
   const signIn = document.querySelector('#google-signin');
   const rememberedFileKey = 'pl-google-selected-file-v1';
+  const rememberedJobOrderFileKey = 'pl-google-job-order-file-v1';
   let accessToken = null;
   let tokenClient = null;
   let dbMetadata = null;
@@ -74,10 +75,10 @@
     });
   }
 
-  function selectDatabaseFile() {
+  function selectGoogleSheet(fileId, title) {
     return new Promise((resolve, reject) => {
       const view = new window.google.picker.DocsView(window.google.picker.ViewId.SPREADSHEETS)
-        .setFileIds(config.spreadsheetId)
+        .setFileIds(fileId)
         .setMimeTypes('application/vnd.google-apps.spreadsheet')
         .setIncludeFolders(false)
         .setSelectFolderEnabled(false)
@@ -92,26 +93,26 @@
         .setCallback(data => {
           if (data.action === window.google.picker.Action.PICKED) {
             const selectedId = data.docs?.[0]?.id;
-            if (selectedId !== config.spreadsheetId) return reject(new Error('เลือกฐานข้อมูลที่ตั้งค่าไว้ไม่สำเร็จ'));
+            if (selectedId !== fileId) return reject(new Error(`เลือกไฟล์ ${title} ไม่สำเร็จ`));
             return resolve();
           }
-          if (data.action === window.google.picker.Action.CANCEL) reject(new Error('ยกเลิกการเลือก Google Sheet'));
+          if (data.action === window.google.picker.Action.CANCEL) reject(new Error(`ยกเลิกการเลือก ${title}`));
         })
         .build();
       picker.setVisible(true);
     });
   }
 
-  async function sheetValues(range) {
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}?valueRenderOption=UNFORMATTED_VALUE`;
+  async function sheetValues(range, spreadsheetId = config.spreadsheetId) {
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueRenderOption=UNFORMATTED_VALUE`;
     const response = await authenticatedFetch(url);
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Google Sheets API ตอบกลับ ${response.status}`);
     return body.values || [];
   }
 
-  async function spreadsheetRequest(suffix = '', options = {}) {
-    const response = await authenticatedFetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(config.spreadsheetId)}${suffix}`, {
+  async function spreadsheetRequest(suffix = '', options = {}, spreadsheetId = config.spreadsheetId) {
+    const response = await authenticatedFetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}${suffix}`, {
       ...options,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -296,13 +297,54 @@
     };
   }
 
-  async function loadJobOrderDataset() {
-    if (!config.jobOrderCsvUrl) return {status:'not-configured',records:[],rowCount:0,firstDate:'',lastDate:'',loadedAt:new Date().toISOString()};
-    const url = new URL(config.jobOrderCsvUrl);
-    url.searchParams.set('_t',String(Date.now()));
-    const response = await fetch(url.toString(), {cache:'no-store'});
-    if (!response.ok) throw new Error(`Job-order Tracking ตอบกลับ ${response.status}`);
-    return {...window.PL_WORKBOOK.parseJobOrderCsv(await response.text()),sourceUrl:config.jobOrderCsvUrl};
+  async function loadJobOrderShiftTransfers() {
+    if (!config.jobOrderShiftTransfersUrl) return [];
+    try {
+      const response = await fetch(config.jobOrderShiftTransfersUrl, {
+        method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
+        body:JSON.stringify({action:'GET_SHIFT_TRANSFERS'}),redirect:'follow',cache:'no-store',
+      });
+      if (!response.ok) return [];
+      const data=await response.json();
+      if (data?.result!=='success'||!Array.isArray(data.transfers)) return [];
+      return data.transfers.map(row=>{
+        const id=String(row.ID||'');
+        const idDate=id.match(/^(\d{4}-\d{2}-\d{2})_/ )?.[1];
+        const parsedDate=row.Date?new Date(row.Date):null;
+        const date=idDate||(parsedDate&&!Number.isNaN(parsedDate.getTime())?`${parsedDate.getFullYear()}-${String(parsedDate.getMonth()+1).padStart(2,'0')}-${String(parsedDate.getDate()).padStart(2,'0')}`:'');
+        return {date,line:String(row.Line||'').trim(),fromHour:Number.parseInt(row.FromHour,10)||0,toHour:Number.parseInt(row.ToHour,10)||0,targetShift:String(row.TargetShift||'').trim()==='Night'?'Night':'Day'};
+      }).filter(row=>row.date&&row.line);
+    } catch { return []; }
+  }
+
+  async function loadJobOrderDataset(onProgress = () => {}) {
+    const spreadsheetId=config.jobOrderSpreadsheetId;
+    if (!spreadsheetId) return {status:'not-configured',records:[],rowCount:0,firstDate:'',lastDate:'',loadedAt:new Date().toISOString()};
+    const fields='spreadsheetId,properties(title),sheets(properties(title,gridProperties(rowCount,columnCount)))';
+    const metadata=await spreadsheetRequest(`?fields=${encodeURIComponent(fields)}`,{},spreadsheetId);
+    const sheet=metadata.sheets?.find(item=>item.properties?.title===config.jobOrderSheetName);
+    if (!sheet) throw new Error(`ไม่พบแท็บ ${config.jobOrderSheetName} ใน ${metadata.properties?.title||'ไฟล์ต้นทาง'}`);
+    const rowCount=Number(sheet.properties.gridProperties?.rowCount)||0;
+    const chunkSize=10000,total=Math.max(1,Math.ceil(Math.max(1,rowCount)/chunkSize)),chunks=[];
+    for(let index=0;index<total;index++){
+      const start=index*chunkSize+1,end=Math.min((index+1)*chunkSize,Math.max(rowCount,1));
+      chunks.push({range:`'${config.jobOrderSheetName.replaceAll("'","''")}'!A${start}:H${end}`});
+    }
+    const values=[];
+    for(let offset=0;offset<chunks.length;offset+=4){
+      const batch=chunks.slice(offset,offset+4);
+      const result=await Promise.all(batch.map(chunk=>sheetValues(chunk.range,spreadsheetId)));
+      result.forEach(part=>values.push(...part));
+      onProgress(Math.min(offset+batch.length,total),total,Math.min((offset+batch.length)*chunkSize,rowCount),rowCount);
+    }
+    if (!values.length) throw new Error(`แท็บ ${config.jobOrderSheetName} ไม่มีแถวข้อมูล`);
+    const parsed=window.PL_WORKBOOK.parseBarcodeLog(values);
+    const transfers=await loadJobOrderShiftTransfers();
+    const hoursInRange=(from,to)=>{const hours=[];for(let i=0,h=((from%24)+24)%24;i<24&&h!==((to%24)+24)%24;i++,h=(h+1)%24)hours.push(h);return hours;};
+    const shiftByDateLineHour=new Map();
+    for(const transfer of transfers)for(const hour of hoursInRange(transfer.fromHour,transfer.toHour))shiftByDateLineHour.set(`${transfer.date}_${transfer.line}_${hour}`,transfer.targetShift);
+    parsed.records.forEach(record=>{record.shift=shiftByDateLineHour.get(`${record.date}_${record.line}_${Number(record.time.slice(0,2))}`)||record.shift;});
+    return {...parsed,sourceTitle:`${metadata.properties?.title||'barcode record'} · ${config.jobOrderSheetName}`,sourceSpreadsheetId:spreadsheetId,sourceRange:`${config.jobOrderSheetName}!A1:H${rowCount}`,shiftTransfersApplied:transfers.length};
   }
 
   async function connect({ reuseAuthorization = false } = {}) {
@@ -312,18 +354,24 @@
     try {
       await requestAccessToken(reuseAuthorization ? 'none' : 'select_account');
       tokenReceived = true;
-      if (!reuseAuthorization) {
+      if (readLocal(rememberedFileKey) !== config.spreadsheetId) {
         setMessage('เลือกฐานข้อมูล Department P&L Database ใน Google Drive…');
-        await selectDatabaseFile();
+        await selectGoogleSheet(config.spreadsheetId,'Department P&L Database');
+        writeLocal(rememberedFileKey, config.spreadsheetId);
+      }
+      if (readLocal(rememberedJobOrderFileKey) !== config.jobOrderSpreadsheetId) {
+        setMessage('เลือกไฟล์ barcode record ใน Google Drive เพื่ออ่านแท็บ Log…');
+        await selectGoogleSheet(config.jobOrderSpreadsheetId,'barcode record');
       }
       setMessage('กำลังอ่านข้อมูลจากชีต…');
       window.PL_DATA = await loadDataset();
       try {
-        window.PL_DATA.jobOrder = await loadJobOrderDataset();
+        window.PL_DATA.jobOrder = await loadJobOrderDataset((done,total,loaded,rowCount)=>setMessage(`กำลังอ่าน barcode record · Log ${new Intl.NumberFormat('th-TH').format(Math.min(loaded,rowCount))}/${new Intl.NumberFormat('th-TH').format(rowCount)} แถว (${done}/${total} ชุด)…`));
+        writeLocal(rememberedJobOrderFileKey, config.jobOrderSpreadsheetId);
       } catch (error) {
         window.PL_DATA.jobOrder = {status:'unavailable',records:[],rowCount:0,firstDate:'',lastDate:'',loadedAt:new Date().toISOString(),error:error.message||'โหลดข้อมูลรายวันไม่สำเร็จ'};
+        if (/401|403|permission|access/i.test(error.message||'')) removeLocal(rememberedJobOrderFileKey);
       }
-      writeLocal(rememberedFileKey, config.spreadsheetId);
       window.PL_DB = {
         connected: true,
         savePlan: appendPlan,
@@ -334,7 +382,7 @@
       document.querySelector('#refresh-data').hidden = false;
       document.querySelector('#connection-status').innerHTML = '<i></i>Google Sheets เชื่อมต่อแล้ว';
       const app = document.createElement('script');
-      app.src = 'app.js?v=20261013d';
+      app.src = 'app.js?v=20261013e';
       app.onerror = () => { gate.hidden = false; document.querySelector('#main').hidden = true; setMessage('เปิดหน้าเว็บไม่สำเร็จ ลองโหลดหน้าใหม่', true); };
       document.body.appendChild(app);
     } catch (error) {
@@ -342,7 +390,10 @@
       const canReuseFailed = reuseAuthorization && /popup|login|required|401|403|permission|access/i.test(error.message || '');
       if (canReuseFailed) {
         needsAccountPicker = true;
-        if (tokenReceived && /401|403|permission|access/i.test(error.message || '')) removeLocal(rememberedFileKey);
+        if (tokenReceived && /401|403|permission|access/i.test(error.message || '')) {
+          removeLocal(rememberedFileKey);
+          removeLocal(rememberedJobOrderFileKey);
+        }
         setMessage(`เชื่อมต่อด้วยสิทธิ์เดิมไม่สำเร็จ${reason} กดอีกครั้งเพื่อเลือกบัญชี Google และยืนยันสิทธิ์ใหม่`, true);
       } else {
         setMessage(`เชื่อมต่อ Google Sheets ไม่สำเร็จ${reason} กดปุ่มเพื่อลองอีกครั้ง`, true);
@@ -351,7 +402,7 @@
     }
   }
 
-  if (!config.googleClientId || !config.googleApiKey || !config.googleProjectNumber || !config.spreadsheetId) {
+  if (!config.googleClientId || !config.googleApiKey || !config.googleProjectNumber || !config.spreadsheetId || !config.jobOrderSpreadsheetId || !config.jobOrderSheetName) {
     setMessage('ต้องตั้งค่า OAuth Client ID, API Key และ Project Number ใน pl-settings.js ก่อนใช้งาน');
   } else {
     loadGoogleServices().then(() => {
@@ -359,9 +410,11 @@
       // started by the user so the browser can open Google's authorization UI.
       removeLocal('pl-google-auto-login-disabled-v1');
       signIn.disabled = false;
-      setMessage(readLocal(rememberedFileKey) === config.spreadsheetId
-        ? 'เคยเชื่อมต่อแล้ว กดปุ่มเพื่อเปิดข้อมูลด้วยสิทธิ์เดิม โดยไม่ต้องเลือกชีตซ้ำ'
-        : 'กดปุ่มเพื่อเข้าสู่ระบบ Google และเลือกฐานข้อมูล Department P&L Database ครั้งแรก');
+      const needsDatabase=readLocal(rememberedFileKey)!==config.spreadsheetId;
+      const needsProduction=readLocal(rememberedJobOrderFileKey)!==config.jobOrderSpreadsheetId;
+      setMessage(needsDatabase||needsProduction
+        ? `กดปุ่มเพื่อเข้าสู่ระบบและอนุญาตไฟล์${needsDatabase?' Department P&L Database':''}${needsDatabase&&needsProduction?' และ':''}${needsProduction?' barcode record':''} ครั้งแรก`
+        : 'เคยเชื่อมต่อแล้ว กดปุ่มเพื่อเปิดข้อมูลด้วยสิทธิ์เดิม โดยไม่ต้องเลือกชีตซ้ำ');
     }).catch(error => setMessage(error.message, true));
   }
   signIn.addEventListener('click', () => {

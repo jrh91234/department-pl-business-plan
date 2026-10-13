@@ -226,6 +226,94 @@
     const dates = records.map(record=>record.date).sort();
     return {status:'loaded',records,rowCount:rows.length-1,firstDate:dates[0]||'',lastDate:dates[dates.length-1]||'',loadedAt:new Date().toISOString()};
   }
+  function parseBarcodeLog(rows) {
+    if (!Array.isArray(rows) || !rows.length) throw new Error('barcode record: ไม่พบข้อมูลในแท็บ Log');
+    const headers = rows[0].map(value=>String(value??'').trim().toLowerCase());
+    const findColumn = (...names) => headers.findIndex(header=>names.some(name=>header===name.toLowerCase()));
+    const cols = {
+      dateTime:findColumn('date/time'), job:findColumn('job order'), model:findColumn('model'),
+      barcode:findColumn('barcode'), status:findColumn('status'), line:findColumn('line'),
+      group:findColumn('scangroupid'),
+    };
+    for (const key of ['dateTime','job','model','barcode','status','line']) if (cols[key] < 0) {
+      throw new Error(`barcode record · Log: ไม่พบคอลัมน์ ${key}`);
+    }
+    const parseDate = value => {
+      const raw = String(value??'').trim();
+      const match = raw.match(/^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$/);
+      let year,month,day;
+      if (match) {
+        const a=Number(match[1]),b=Number(match[2]),c=Number(match[3]);
+        if (a>1000) { year=a;month=b;day=c; }
+        else { day=a;month=b;year=c; }
+      } else {
+        const iso=raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+        if (!iso) return '';
+        year=Number(iso[1]);month=Number(iso[2]);day=Number(iso[3]);
+      }
+      if (year>=2400) year-=543;
+      const date=new Date(Date.UTC(year,month-1,day));
+      if (!Number.isInteger(year)||!Number.isInteger(month)||!Number.isInteger(day)||date.getUTCFullYear()!==year||date.getUTCMonth()!==month-1||date.getUTCDate()!==day) return '';
+      return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+    };
+    const groupRows=new Map(), legacySeen=new Set(), scans=[];
+    let rawRows=0,voidRows=0,ignoredRows=0;
+    for (const row of rows.slice(1)) {
+      const rawDateTime=String(row[cols.dateTime]??'').trim();
+      if (!rawDateTime) continue;
+      rawRows++;
+      let datePart='',timePart='';
+      const dateTime=rawDateTime.match(/^(.+?)\s+(\d{1,2}:\d{2}(?::\d{2})?)(?:\s.*)?$/);
+      if (dateTime) { datePart=dateTime[1];timePart=dateTime[2]; }
+      else if (typeof row[cols.dateTime]==='number'&&Number.isFinite(row[cols.dateTime])) {
+        const serial=row[cols.dateTime],whole=Math.floor(serial),seconds=Math.round((serial-whole)*86400);
+        const calendar=new Date(Date.UTC(1899,11,30)+whole*86400000);
+        const hour=Math.floor(seconds/3600),minute=Math.floor(seconds%3600/60),second=seconds%60;
+        datePart=`${calendar.getUTCDate()}/${calendar.getUTCMonth()+1}/${calendar.getUTCFullYear()}`;
+        timePart=`${hour}:${minute}:${second}`;
+      } else { ignoredRows++;continue; }
+      const date=parseDate(datePart),time=timeValue(timePart);
+      if (!date||!time) { ignoredRows++;continue; }
+      const [year,month,day]=date.split('-').map(Number);
+      const ts=Date.UTC(year,month-1,day,time.hour,time.minute,time.second);
+      const prodDate=new Date(ts);
+      const shift=time.hour<8?'Night':time.hour>=20?'Night':'Day';
+      if (time.hour<8) prodDate.setUTCDate(prodDate.getUTCDate()-1);
+      const productionDate=`${prodDate.getUTCFullYear()}-${String(prodDate.getUTCMonth()+1).padStart(2,'0')}-${String(prodDate.getUTCDate()).padStart(2,'0')}`;
+      const barcode=String(row[cols.barcode]??'').trim()||'-';
+      const status=String(row[cols.status]??'OK').trim()||'OK';
+      const model=String(row[cols.model]??'').trim()||'-';
+      if (status.toUpperCase()==='CHANGEOVER') { ignoredRows++;continue; }
+      const scan={
+        date:productionDate,time:time.label,ts,jobNo:String(row[cols.job]??'').trim()||'MANUAL_MODE',
+        model,barcode,status,line:String(row[cols.line]??'').trim()||'-',shift,hour:time.hour,
+        rawDateTime,
+      };
+      const groupId=cols.group<0?'':String(row[cols.group]??'').trim();
+      if (groupId) {
+        if (!groupRows.has(groupId)) groupRows.set(groupId,[]);
+        groupRows.get(groupId).push(scan);
+      } else {
+        const key=`${barcode}_${rawDateTime}`;
+        if (legacySeen.has(key)) { ignoredRows++;continue; }
+        legacySeen.add(key);
+        scan.qty=model.trim().toUpperCase()==='R9HME106'?5:1;
+        scans.push(scan);
+      }
+    }
+    for (const group of groupRows.values()) {
+      const representative=group[0];
+      representative.qty=group.length;
+      scans.push(representative);
+    }
+    const records=scans.filter(scan=>{
+      if (scan.status.toUpperCase()==='VOID') { voidRows++;return false; }
+      if (scan.status.toUpperCase()!=='OK') { ignoredRows++;return false; }
+      return true;
+    }).map(({rawDateTime,...record})=>record).sort((a,b)=>a.ts-b.ts);
+    const dates=records.map(record=>record.date).sort();
+    return {status:'loaded',records,rowCount:rawRows,voidRows,ignoredRows,firstDate:dates[0]||'',lastDate:dates.at(-1)||'',loadedAt:new Date().toISOString()};
+  }
   function nativeDataset(metadata, gridSheets) {
     const grids = Object.fromEntries(gridSheets.map(s => [s.properties.title,decodeGrid(s)]));
     const configs = [['pd','BP บริษัท A (PD)','แผนก PD'],['company','BP บริษัท A','บริษัท A (ภาพรวม)']];
@@ -241,7 +329,7 @@
       sources:metadata.sheets.map(({properties:p})=>({name:p.title,sheetId:p.sheetId,dimension:`A1:${columnName(p.gridProperties.columnCount-1)}${p.gridProperties.rowCount}`,hidden:!!p.hidden,errors:grids[p.title]?.errors.length??null,scope:grids[p.title]?'ตรวจเฉพาะช่วงที่เว็บอ่าน':'ยังไม่ได้ตรวจสูตร',checkedRange:grids[p.title]?`A1:${columnName(Math.min(p.gridProperties.columnCount,p.title==='Sale Price'?17:74)-1)}${p.gridProperties.rowCount}`:null})),
     };
   }
-  const api = {MONTHS,DEFINITIONS,columnName,decodeGrid,parseScope,parseProducts,parseCsvRows,parseJobOrderCsv,nativeDataset};
+  const api = {MONTHS,DEFINITIONS,columnName,decodeGrid,parseScope,parseProducts,parseCsvRows,parseJobOrderCsv,parseBarcodeLog,nativeDataset};
   if (typeof window !== 'undefined') window.PL_WORKBOOK = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

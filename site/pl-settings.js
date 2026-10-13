@@ -3,5 +3,7 @@ window.PL_CONFIG = Object.freeze({
   googleApiKey: 'AIzaSyBHZ9elA1z5eCs2C_72er3V1JIpAcWt684',
   googleProjectNumber: '727954634451',
   spreadsheetId: '1ZZKFLPCjv06TxUmtcMlZ7pvVZvyDpkZmM8FIWNq3xZQ',
-  jobOrderCsvUrl: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRlXWxz5TKmlYhh7oxo3Fz2KgWK36xlJD8k9NTNK6XUFs5c1RRnYIkAYizQUzJHJofOGFAQaVvy47gT/pub?gid=934980474&single=true&output=csv',
+  jobOrderSpreadsheetId: '1OX5aKM-TuJPJIT_7v3Lq5WcvixxUo3ppt0c17Wqz8iE',
+  jobOrderSheetName: 'Log',
+  jobOrderShiftTransfersUrl: 'https://script.google.com/macros/s/AKfycbxZqA-HEsacO4Ie0Tn7Mw5tr0Zz1eYpmbza0dgNxyt30Qkku6HoT25ZLChbysUDHoRf/exec',
 });
