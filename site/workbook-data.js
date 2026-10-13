@@ -74,6 +74,7 @@
   }
   function parseProducts(rows) {
     const keyOf = model => text(model).replace(/-S$/i,'').toUpperCase();
+    const fcExchangeRate = number(rows[0]?.[14]);
     const products = [], forecasts = new Map();
     rows.slice(4).forEach((row, i) => {
       const model = text(row[1]);
@@ -84,7 +85,9 @@
       const model = text(row[10]);
       if (!model) return;
       const key = keyOf(model);
-      const forecast = {forecastModel:model,description:text(row[11]),fcPriceUSD:number(row[12]),fcRmUSD:number(row[13]),fcTHB:number(row[14]),rmRate:number(row[16]),forecastSourceRow:i+5};
+      const fcPriceUSD = number(row[12]), sheetFcTHB = number(row[14]);
+      const fcTHB = sheetFcTHB ?? (fcPriceUSD !== null && fcExchangeRate !== null ? fcPriceUSD * fcExchangeRate : null);
+      const forecast = {forecastModel:model,description:text(row[11]),fcPriceUSD,fcRmUSD:number(row[13]),fcTHB,fcTHBSource:sheetFcTHB !== null ? 'Sale Price · FC BHT' : fcTHB !== null ? 'Sale Price · FC USD × Rate' : '',fcExchangeRate,rmRate:number(row[16]),forecastSourceRow:i+5};
       if (!forecasts.has(key)) forecasts.set(key,[]);
       forecasts.get(key).push(forecast);
     });
