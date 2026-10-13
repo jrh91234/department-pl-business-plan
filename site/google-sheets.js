@@ -275,6 +275,15 @@
     };
   }
 
+  async function loadJobOrderDataset() {
+    if (!config.jobOrderCsvUrl) return {status:'not-configured',records:[],rowCount:0,firstDate:'',lastDate:'',loadedAt:new Date().toISOString()};
+    const url = new URL(config.jobOrderCsvUrl);
+    url.searchParams.set('_t',String(Date.now()));
+    const response = await fetch(url.toString(), {cache:'no-store'});
+    if (!response.ok) throw new Error(`Job-order Tracking ตอบกลับ ${response.status}`);
+    return {...window.PL_WORKBOOK.parseJobOrderCsv(await response.text()),sourceUrl:config.jobOrderCsvUrl};
+  }
+
   async function connect() {
     signIn.disabled = true;
     setMessage('กำลังเข้าสู่ระบบและอ่านข้อมูลจากชีต…');
@@ -284,6 +293,11 @@
       await selectDatabaseFile();
       setMessage('กำลังอ่านข้อมูลจากชีต…');
       window.PL_DATA = await loadDataset();
+      try {
+        window.PL_DATA.jobOrder = await loadJobOrderDataset();
+      } catch (error) {
+        window.PL_DATA.jobOrder = {status:'unavailable',records:[],rowCount:0,firstDate:'',lastDate:'',loadedAt:new Date().toISOString(),error:error.message||'โหลดข้อมูลรายวันไม่สำเร็จ'};
+      }
       window.PL_DB = {
         connected: true,
         savePlan: appendPlan,

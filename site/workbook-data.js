@@ -100,6 +100,111 @@
     for (const [key,candidates] of forecasts) if (!matched.has(key)) candidates.forEach(forecast => products.push({model:forecast.forecastModel,priceUSD:null,rmUSD:null,bpTHB:null,bpRmTHB:null,bpRmRate:null,sourceRow:null,...forecast}));
     return products;
   }
+  function parseCsvRows(input) {
+    const source = String(input ?? '').replace(/^\uFEFF/, '');
+    const rows = [];
+    let row = [], field = '', quoted = false;
+    for (let i = 0; i < source.length; i++) {
+      const char = source[i];
+      if (char === '"') {
+        if (quoted && source[i + 1] === '"') { field += '"'; i++; }
+        else quoted = !quoted;
+      } else if (char === ',' && !quoted) {
+        row.push(field); field = '';
+      } else if ((char === '\n' || char === '\r') && !quoted) {
+        row.push(field); field = '';
+        if (row.some(value => text(value))) rows.push(row);
+        row = [];
+        if (char === '\r' && source[i + 1] === '\n') i++;
+      } else field += char;
+    }
+    if (field || row.length) {
+      row.push(field);
+      if (row.some(value => text(value))) rows.push(row);
+    }
+    return rows;
+  }
+  function dateKey(value) {
+    const input = text(value).split(' ')[0];
+    let match = input.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (match) {
+      const [,day,month,year] = match.map(Number);
+      const date = new Date(Date.UTC(year,month-1,day));
+      return date.getUTCFullYear()===year && date.getUTCMonth()===month-1 && date.getUTCDate()===day
+        ? `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}` : '';
+    }
+    match = input.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (!match) return '';
+    const [,yearText,monthText,dayText] = match;
+    const year = Number(yearText), month = Number(monthText), day = Number(dayText);
+    const date = new Date(Date.UTC(year,month-1,day));
+    return date.getUTCFullYear()===year && date.getUTCMonth()===month-1 && date.getUTCDate()===day
+      ? `${yearText}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}` : '';
+  }
+  function timeValue(value) {
+    const match = text(value).match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    if (!match) return {label:'00:00',hour:0,minute:0,second:0};
+    const hour = Math.min(23,Number(match[1])), minute = Math.min(59,Number(match[2])), second = Math.min(59,Number(match[3]||0));
+    return {label:`${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`,hour,minute,second};
+  }
+  function parseJobOrderCsv(input) {
+    const rows = parseCsvRows(input);
+    if (rows.length < 2) return {status:'loaded',records:[],rowCount:0,firstDate:'',lastDate:'',loadedAt:new Date().toISOString()};
+    const headers = rows[0].map(text);
+    const findColumn = (exact, partial=[]) => {
+      const normalized = headers.map(value=>value.toLowerCase());
+      const exactIndex = normalized.findIndex(value=>exact.some(alias=>value===alias.toLowerCase()));
+      if (exactIndex >= 0) return exactIndex;
+      return normalized.findIndex(value=>partial.some(alias=>value.includes(alias.toLowerCase())));
+    };
+    const cols = {
+      date:findColumn(['Date'],['date','วันที่']),
+      time:findColumn(['Time (เวลา)','Time'],['time','เวลา']),
+      job:findColumn(['Job order No. หมายเลขกำกับงาน','Job order No.','Job order','Job No'],['job order','job no','หมายเลขกำกับงาน']),
+      model:findColumn(['Model'],['model']),
+      qty:findColumn(['FG Qty (จำนวน)','FG Qty','fgqty'],['fg qty','fgqty','จำนวน']),
+      line:findColumn(['Line'],['line']),
+      shift:findColumn(['Shift','กะ'],['shift','กะ']),
+      shiftAB:findColumn(['Shift A/B','ShiftA/B'],['shift a/b','shiftab','กะย่อย']),
+      status:findColumn(['Status','สถานะ'],['status','สถานะ']),
+      barcode:findColumn(['Barcode','บาร์โค้ด'],['barcode','บาร์โค้ด']),
+    };
+    for (const key of ['date','time','job','model','qty']) if (cols[key] < 0) {
+      throw new Error(`Job-order Tracking: ไม่พบคอลัมน์ ${key} ใน CSV`);
+    }
+    const seen = new Set(), scans = [];
+    for (const values of rows.slice(1)) {
+      const get = key => text(values[cols[key]]);
+      const jobNo = get('job'), model = get('model'), dateRaw = get('date'), timeRaw = get('time'), date = dateKey(dateRaw);
+      const qty = parseInt(get('qty').replace(/,/g,''),10) || 0;
+      const time = timeValue(timeRaw);
+      const line = cols.line < 0 ? 'Line 1' : (get('line') || 'Line 1');
+      const shift = cols.shift < 0 ? 'Day' : (get('shift') || 'Day');
+      const shiftAB = cols.shiftAB < 0 ? '-' : (get('shiftAB') || '-');
+      const barcode = cols.barcode < 0 ? '' : get('barcode');
+      const status = cols.status < 0 ? '' : get('status').toUpperCase();
+      if (!jobNo || !model || !date || qty <= 0 || status === 'VOID') continue;
+      const key = barcode ? `${barcode}_${dateRaw}_${timeRaw}` : `${jobNo}_${dateRaw}_${timeRaw}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const [year,month,day] = date.split('-').map(Number);
+      const ts = Date.UTC(year,month-1,day,time.hour,time.minute,time.second);
+      scans.push({date,time:time.label,jobNo,model,qty,line,shift,shiftAB,barcode,ts});
+    }
+    scans.sort((a,b)=>a.ts-b.ts);
+    const lastScanByLineAndBarcode = new Map(), records = [];
+    for (const scan of scans) {
+      if (scan.barcode && scan.barcode !== '-') {
+        const key = `${scan.line}|${scan.barcode}`;
+        const previous = lastScanByLineAndBarcode.get(key);
+        if (previous && scan.ts-previous.ts>=0 && scan.ts-previous.ts<=5000) continue;
+        lastScanByLineAndBarcode.set(key,scan);
+      }
+      records.push(scan);
+    }
+    const dates = records.map(record=>record.date).sort();
+    return {status:'loaded',records,rowCount:rows.length-1,firstDate:dates[0]||'',lastDate:dates[dates.length-1]||'',loadedAt:new Date().toISOString()};
+  }
   function nativeDataset(metadata, gridSheets) {
     const grids = Object.fromEntries(gridSheets.map(s => [s.properties.title,decodeGrid(s)]));
     const configs = [['pd','BP บริษัท A (PD)','แผนก PD'],['company','BP บริษัท A','บริษัท A (ภาพรวม)']];
@@ -115,7 +220,7 @@
       sources:metadata.sheets.map(({properties:p})=>({name:p.title,sheetId:p.sheetId,dimension:`A1:${columnName(p.gridProperties.columnCount-1)}${p.gridProperties.rowCount}`,hidden:!!p.hidden,errors:grids[p.title]?.errors.length??null,scope:grids[p.title]?'ตรวจเฉพาะช่วงที่เว็บอ่าน':'ยังไม่ได้ตรวจสูตร',checkedRange:grids[p.title]?`A1:${columnName(Math.min(p.gridProperties.columnCount,p.title==='Sale Price'?17:74)-1)}${p.gridProperties.rowCount}`:null})),
     };
   }
-  const api = {MONTHS,DEFINITIONS,columnName,decodeGrid,parseScope,parseProducts,nativeDataset};
+  const api = {MONTHS,DEFINITIONS,columnName,decodeGrid,parseScope,parseProducts,parseCsvRows,parseJobOrderCsv,nativeDataset};
   if (typeof window !== 'undefined') window.PL_WORKBOOK = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();
