@@ -345,7 +345,8 @@
     } catch (error) {
       if (silent && tokenReceived && /401|403|permission|access/i.test(error.message || '')) removeLocal(rememberedFileKey);
       if (silent) {
-        setMessage('เชื่อมต่ออัตโนมัติไม่สำเร็จ กด “เข้าสู่ระบบ Google” เพื่อดำเนินการต่อ', false);
+        const reason = error.message ? `: ${error.message}` : '';
+        setMessage(`เชื่อมต่ออัตโนมัติไม่สำเร็จ${reason} กด “เข้าสู่ระบบ Google” เพื่อดำเนินการต่อ`, true);
       } else {
         setMessage(error.message || 'เชื่อมต่อ Google Sheets ไม่สำเร็จ ตรวจ Client ID และสิทธิ์ในชีต', true);
       }
