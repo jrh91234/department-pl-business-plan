@@ -4,6 +4,8 @@
   const gate = document.querySelector('#connect-gate');
   const message = document.querySelector('#connect-message');
   const signIn = document.querySelector('#google-signin');
+  const autoLoginDisabledKey = 'pl-google-auto-login-disabled-v1';
+  const rememberedFileKey = 'pl-google-selected-file-v1';
   let accessToken = null;
   let tokenClient = null;
   let dbMetadata = null;
@@ -37,7 +39,7 @@
     });
   }
 
-  function requestAccessToken() {
+  function requestAccessToken(prompt = 'select_account') {
     return new Promise((resolve, reject) => {
       tokenClient = window.google.accounts.oauth2.initTokenClient({
         client_id: config.googleClientId,
@@ -49,8 +51,33 @@
         },
         error_callback: error => reject(new Error(error.message || 'เข้าสู่ระบบ Google ไม่สำเร็จ')),
       });
-      tokenClient.requestAccessToken({ prompt: 'select_account' });
+      tokenClient.requestAccessToken({ prompt });
     });
+  }
+
+  function readLocal(key) {
+    try { return localStorage.getItem(key); } catch { return null; }
+  }
+
+  function writeLocal(key, value) {
+    try { localStorage.setItem(key, value); } catch { /* Private browsing may block storage. */ }
+  }
+
+  function removeLocal(key) {
+    try { localStorage.removeItem(key); } catch { /* Private browsing may block storage. */ }
+  }
+
+  async function authenticatedFetch(url, options = {}) {
+    const send = () => fetch(url, {
+      ...options,
+      headers: { ...(options.headers || {}), Authorization: `Bearer ${accessToken}` },
+    });
+    let response = await send();
+    if (response.status === 401) {
+      await requestAccessToken('none');
+      response = await send();
+    }
+    return response;
   }
 
   function selectDatabaseFile() {
@@ -83,16 +110,16 @@
 
   async function sheetValues(range) {
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(range)}?valueRenderOption=UNFORMATTED_VALUE`;
-    const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const response = await authenticatedFetch(url);
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Google Sheets API ตอบกลับ ${response.status}`);
     return body.values || [];
   }
 
   async function spreadsheetRequest(suffix = '', options = {}) {
-    const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(config.spreadsheetId)}${suffix}`, {
+    const response = await authenticatedFetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(config.spreadsheetId)}${suffix}`, {
       ...options,
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
     });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Google Sheets API ตอบกลับ ${response.status}`);
@@ -137,9 +164,9 @@
       plan.assumptions.volume, plan.assumptions.price, plan.assumptions.raw,
       plan.assumptions.labor, plan.assumptions.fixed, JSON.stringify(plan.initiatives || []),
     ];
-    const response = await fetch(url, {
+    const response = await authenticatedFetch(url, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ values: [row] }),
     });
     const body = await response.json();
@@ -284,13 +311,17 @@
     return {...window.PL_WORKBOOK.parseJobOrderCsv(await response.text()),sourceUrl:config.jobOrderCsvUrl};
   }
 
-  async function connect() {
+  async function connect({ silent = false } = {}) {
+    let tokenReceived = false;
     signIn.disabled = true;
-    setMessage('กำลังเข้าสู่ระบบและอ่านข้อมูลจากชีต…');
+    setMessage(silent ? 'กำลังเชื่อมต่อ Google อัตโนมัติ…' : 'กำลังเข้าสู่ระบบและอ่านข้อมูลจากชีต…');
     try {
-      await requestAccessToken();
-      setMessage('เลือกฐานข้อมูล Department P&L Database ใน Google Drive…');
-      await selectDatabaseFile();
+      await requestAccessToken(silent ? 'none' : 'select_account');
+      tokenReceived = true;
+      if (!silent) {
+        setMessage('เลือกฐานข้อมูล Department P&L Database ใน Google Drive…');
+        await selectDatabaseFile();
+      }
       setMessage('กำลังอ่านข้อมูลจากชีต…');
       window.PL_DATA = await loadDataset();
       try {
@@ -298,6 +329,8 @@
       } catch (error) {
         window.PL_DATA.jobOrder = {status:'unavailable',records:[],rowCount:0,firstDate:'',lastDate:'',loadedAt:new Date().toISOString(),error:error.message||'โหลดข้อมูลรายวันไม่สำเร็จ'};
       }
+      writeLocal(rememberedFileKey, config.spreadsheetId);
+      removeLocal(autoLoginDisabledKey);
       window.PL_DB = {
         connected: true,
         savePlan: appendPlan,
@@ -312,7 +345,12 @@
       app.onerror = () => { gate.hidden = false; document.querySelector('#main').hidden = true; setMessage('เปิดหน้าเว็บไม่สำเร็จ ลองโหลดหน้าใหม่', true); };
       document.body.appendChild(app);
     } catch (error) {
-      setMessage(error.message || 'เชื่อมต่อ Google Sheets ไม่สำเร็จ ตรวจ Client ID และสิทธิ์ในชีต', true);
+      if (silent && tokenReceived && /401|403|permission|access/i.test(error.message || '')) removeLocal(rememberedFileKey);
+      if (silent) {
+        setMessage('เชื่อมต่ออัตโนมัติไม่สำเร็จ กด “เข้าสู่ระบบ Google” เพื่อดำเนินการต่อ', false);
+      } else {
+        setMessage(error.message || 'เชื่อมต่อ Google Sheets ไม่สำเร็จ ตรวจ Client ID และสิทธิ์ในชีต', true);
+      }
       signIn.disabled = false;
     }
   }
@@ -321,10 +359,20 @@
     setMessage('ต้องตั้งค่า OAuth Client ID, API Key และ Project Number ใน pl-settings.js ก่อนใช้งาน');
   } else {
     loadGoogleServices().then(() => {
-      signIn.disabled = false;
-      setMessage('เข้าสู่ระบบแล้วเลือกฐานข้อมูล Department P&L Database เพื่อให้สิทธิ์เฉพาะไฟล์นี้');
+      if (readLocal(autoLoginDisabledKey) === '1') {
+        signIn.disabled = false;
+        setMessage('เข้าสู่ระบบแล้วเลือกฐานข้อมูล Department P&L Database เพื่อให้สิทธิ์เฉพาะไฟล์นี้');
+      } else {
+        setMessage(readLocal(rememberedFileKey) === config.spreadsheetId
+          ? 'พบฐานข้อมูลที่เคยเลือก กำลังเชื่อมต่ออัตโนมัติ…'
+          : 'กำลังตรวจการอนุญาต Google ที่เคยให้ไว้…');
+        connect({ silent: true });
+      }
     }).catch(error => setMessage(error.message, true));
   }
   signIn.addEventListener('click', connect);
-  document.querySelector('#disconnect').addEventListener('click', () => location.reload());
+  document.querySelector('#disconnect').addEventListener('click', () => {
+    writeLocal(autoLoginDisabledKey, '1');
+    location.reload();
+  });
 })();
