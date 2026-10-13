@@ -13,8 +13,11 @@
 .daily-notice{display:flex;align-items:flex-start;gap:9px;margin-bottom:20px;padding:11px 13px;border:1px solid #e2eaf0;border-radius:6px;background:#f5f8fa;color:#718397;font-size:10px;line-height:1.8}
 .daily-notice svg{width:14px;height:14px;flex:0 0 auto;margin-top:2px;color:#8097aa}
 .daily-content-grid{display:grid;grid-template-columns:1.05fr 1fr;gap:20px;margin-bottom:20px;align-items:start}
-.daily-chart{padding:20px 18px 14px}
+.daily-chart{padding:20px 18px 14px;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin;scrollbar-color:#cbd8dc transparent}
 .daily-chart svg{width:100%;height:auto;overflow:visible}
+.daily-chart-head{align-items:flex-start}
+.daily-chart-control{display:flex;align-items:center;gap:7px;flex:0 0 auto;color:#8a97a5;font-size:9px}
+.daily-chart-control select{border:1px solid #e1e8ed;border-radius:5px;padding:6px 23px 6px 8px;background:#fff;color:#405069;font:550 10px var(--font)}
 .daily-chart text{font-family:var(--font);font-size:9px;fill:#95a1af}
 .daily-model-table{max-height:310px}
 .daily-log-panel .table-wrap{max-height:420px}
