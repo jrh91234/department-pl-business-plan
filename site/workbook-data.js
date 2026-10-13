@@ -125,26 +125,41 @@
     return rows;
   }
   function dateKey(value) {
-    const input = text(value).split(' ')[0];
-    let match = input.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-    if (match) {
-      const [,day,month,year] = match.map(Number);
+    const raw = text(value).replace(/^'/,'');
+    const input = raw.split(' ')[0];
+    if (!input || input === '-') return '';
+    const toKey = (year,month,day) => {
+      year = Number(year); month = Number(month); day = Number(day);
+      if (!Number.isInteger(year) || year < 1000 || !Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(day) || day < 1 || day > 31) return '';
       const date = new Date(Date.UTC(year,month-1,day));
       return date.getUTCFullYear()===year && date.getUTCMonth()===month-1 && date.getUTCDate()===day
         ? `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}` : '';
+    };
+    let match = input.match(/^(\d{1,4})\/(\d{1,2})\/(\d{1,4})$/);
+    if (match) {
+      const first = Number(match[1]), second = Number(match[2]), third = Number(match[3]);
+      if (first > 1000) return toKey(first,second,third); // YYYY/MM/DD
+      if (first > 12) return toKey(third,second,first); // DD/MM/YYYY
+      if (second > 12) return toKey(third,first,second); // MM/DD/YYYY
+      return toKey(third,second,first); // Ambiguous dates follow the source app's Thai DD/MM rule.
     }
     match = input.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-    if (!match) return '';
-    const [,yearText,monthText,dayText] = match;
-    const year = Number(yearText), month = Number(monthText), day = Number(dayText);
-    const date = new Date(Date.UTC(year,month-1,day));
-    return date.getUTCFullYear()===year && date.getUTCMonth()===month-1 && date.getUTCDate()===day
-      ? `${yearText}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}` : '';
+    if (match) return toKey(match[1],match[2],match[3]);
+    match = input.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+    if (match) return toKey(match[3],match[2],match[1]); // DD-MM-YYYY
+    const serial = Number(input);
+    if (Number.isFinite(serial) && serial > 10000) {
+      const date = new Date(Date.UTC(1899,11,30) + Math.trunc(serial) * 86400000);
+      return toKey(date.getUTCFullYear(),date.getUTCMonth()+1,date.getUTCDate());
+    }
+    const fallback = new Date(raw);
+    return Number.isNaN(fallback.getTime()) ? '' : toKey(fallback.getUTCFullYear(),fallback.getUTCMonth()+1,fallback.getUTCDate());
   }
   function timeValue(value) {
-    const match = text(value).match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-    if (!match) return {label:'00:00',hour:0,minute:0,second:0};
-    const hour = Math.min(23,Number(match[1])), minute = Math.min(59,Number(match[2])), second = Math.min(59,Number(match[3]||0));
+    const match = text(value).replace(/^'/,'').match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    if (!match) return null;
+    const hour = Number(match[1]), minute = Number(match[2]), second = Number(match[3]||0);
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
     return {label:`${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`,hour,minute,second};
   }
   function parseJobOrderCsv(input) {
@@ -169,27 +184,30 @@
       status:findColumn(['Status','สถานะ'],['status','สถานะ']),
       barcode:findColumn(['Barcode','บาร์โค้ด'],['barcode','บาร์โค้ด']),
     };
-    for (const key of ['date','time','job','model','qty']) if (cols[key] < 0) {
+    for (const key of ['date','time','job','qty']) if (cols[key] < 0) {
       throw new Error(`Job-order Tracking: ไม่พบคอลัมน์ ${key} ใน CSV`);
     }
     const seen = new Set(), scans = [];
+    // Keep the same production-row filters as Job-order Tracking's buildHourlyBreakdownMap.
     for (const values of rows.slice(1)) {
       const get = key => text(values[cols[key]]);
-      const jobNo = get('job'), model = get('model'), dateRaw = get('date'), timeRaw = get('time'), date = dateKey(dateRaw);
+      const raw = key => String(values[cols[key]] ?? '').trim();
+      const jobNo = raw('job'), model = cols.model < 0 ? '' : get('model'), dateRaw = raw('date'), timeRaw = raw('time'), date = dateKey(dateRaw);
       const qty = parseInt(get('qty').replace(/,/g,''),10) || 0;
       const time = timeValue(timeRaw);
-      const line = cols.line < 0 ? 'Line 1' : (get('line') || 'Line 1');
+      if (!jobNo || !date || !time || qty <= 0) continue;
+      const line = cols.line < 0 ? 'Line 1' : (raw('line') || 'Line 1');
       const shift = cols.shift < 0 ? 'Day' : (get('shift') || 'Day');
       const shiftAB = cols.shiftAB < 0 ? '-' : (get('shiftAB') || '-');
-      const barcode = cols.barcode < 0 ? '' : get('barcode');
-      const status = cols.status < 0 ? '' : get('status').toUpperCase();
-      if (!jobNo || !model || !date || qty <= 0 || status === 'VOID') continue;
+      const barcode = cols.barcode < 0 ? '' : raw('barcode');
+      const status = cols.status < 0 ? '' : raw('status').toUpperCase();
+      if (status === 'VOID') continue;
       const key = barcode ? `${barcode}_${dateRaw}_${timeRaw}` : `${jobNo}_${dateRaw}_${timeRaw}`;
       if (seen.has(key)) continue;
       seen.add(key);
       const [year,month,day] = date.split('-').map(Number);
       const ts = Date.UTC(year,month-1,day,time.hour,time.minute,time.second);
-      scans.push({date,time:time.label,jobNo,model,qty,line,shift,shiftAB,barcode,ts});
+      scans.push({date,time:time.label,jobNo,model:model||'ไม่ระบุรุ่น',qty,line,shift,shiftAB,barcode,ts});
     }
     scans.sort((a,b)=>a.ts-b.ts);
     const lastScanByLineAndBarcode = new Map(), records = [];
@@ -197,7 +215,7 @@
       if (scan.barcode && scan.barcode !== '-') {
         const key = `${scan.line}|${scan.barcode}`;
         const previous = lastScanByLineAndBarcode.get(key);
-        if (previous && scan.ts-previous.ts>=0 && scan.ts-previous.ts<=5000) continue;
+        if (previous && scan.ts === previous.ts) continue;
         lastScanByLineAndBarcode.set(key,scan);
       }
       records.push(scan);
