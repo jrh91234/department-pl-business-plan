@@ -235,9 +235,7 @@
       barcode:findColumn('barcode'), status:findColumn('status'), line:findColumn('line'),
       group:findColumn('scangroupid'),
     };
-    for (const key of ['dateTime','job','model','barcode','status','line']) if (cols[key] < 0) {
-      throw new Error(`barcode record · Log: ไม่พบคอลัมน์ ${key}`);
-    }
+    if (cols.dateTime < 0) throw new Error('barcode record · Log: ไม่พบคอลัมน์ Date/Time');
     const parseDate = value => {
       const raw = String(value??'').trim();
       const match = raw.match(/^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$/);
@@ -259,7 +257,7 @@
     const groupRows=new Map(), legacySeen=new Set(), scans=[];
     let rawRows=0,voidRows=0,ignoredRows=0;
     for (const row of rows.slice(1)) {
-      const rawDateTime=String(row[cols.dateTime]??'').trim();
+      const rawDateTime=String(row[cols.dateTime]||'').trim();
       if (!rawDateTime) continue;
       rawRows++;
       let datePart='',timePart='';
@@ -280,16 +278,16 @@
       const shift=time.hour<8?'Night':time.hour>=20?'Night':'Day';
       if (time.hour<8) prodDate.setUTCDate(prodDate.getUTCDate()-1);
       const productionDate=`${prodDate.getUTCFullYear()}-${String(prodDate.getUTCMonth()+1).padStart(2,'0')}-${String(prodDate.getUTCDate()).padStart(2,'0')}`;
-      const barcode=String(row[cols.barcode]??'').trim()||'-';
-      const status=String(row[cols.status]??'OK').trim()||'OK';
-      const model=String(row[cols.model]??'').trim()||'-';
+      const barcode=String(row[cols.barcode]||'-').trim();
+      const status=String(row[cols.status]||'OK').trim();
+      const model=String(row[cols.model]||'-').trim();
       if (status.toUpperCase()==='CHANGEOVER') { ignoredRows++;continue; }
       const scan={
-        date:productionDate,time:time.label,ts,jobNo:String(row[cols.job]??'').trim()||'MANUAL_MODE',
-        model,barcode,status,line:String(row[cols.line]??'').trim()||'-',shift,hour:time.hour,
+        date:productionDate,time:time.label,ts,jobNo:String(row[cols.job]||'MANUAL_MODE').trim(),
+        model,barcode,status,line:String(row[cols.line]||'-').trim(),shift,hour:time.hour,
         rawDateTime,
       };
-      const groupId=cols.group<0?'':String(row[cols.group]??'').trim();
+      const groupId=cols.group<0?'':String(row[cols.group]||'').trim();
       if (groupId) {
         if (!groupRows.has(groupId)) groupRows.set(groupId,[]);
         groupRows.get(groupId).push(scan);

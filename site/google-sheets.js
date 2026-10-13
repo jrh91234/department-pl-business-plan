@@ -103,8 +103,8 @@
     });
   }
 
-  async function sheetValues(range, spreadsheetId = config.spreadsheetId) {
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueRenderOption=UNFORMATTED_VALUE`;
+  async function sheetValues(range, spreadsheetId = config.spreadsheetId, valueRenderOption = 'UNFORMATTED_VALUE') {
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueRenderOption=${encodeURIComponent(valueRenderOption)}`;
     const response = await authenticatedFetch(url);
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Google Sheets API ตอบกลับ ${response.status}`);
@@ -298,23 +298,24 @@
   }
 
   async function loadJobOrderShiftTransfers() {
-    if (!config.jobOrderShiftTransfersUrl) return [];
+    if (!config.jobOrderShiftTransfersUrl) return {transfers:[],error:''};
     try {
       const response = await fetch(config.jobOrderShiftTransfersUrl, {
         method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
         body:JSON.stringify({action:'GET_SHIFT_TRANSFERS'}),redirect:'follow',cache:'no-store',
       });
-      if (!response.ok) return [];
+      if (!response.ok) return {transfers:[],error:`Apps Script ตอบกลับ ${response.status}`};
       const data=await response.json();
-      if (data?.result!=='success'||!Array.isArray(data.transfers)) return [];
-      return data.transfers.map(row=>{
+      if (data?.result!=='success'||!Array.isArray(data.transfers)) return {transfers:[],error:'Apps Script ส่งรูปแบบรายการโอนกะไม่ถูกต้อง'};
+      const transfers=data.transfers.map(row=>{
         const id=String(row.ID||'');
         const idDate=id.match(/^(\d{4}-\d{2}-\d{2})_/ )?.[1];
         const parsedDate=row.Date?new Date(row.Date):null;
         const date=idDate||(parsedDate&&!Number.isNaN(parsedDate.getTime())?`${parsedDate.getFullYear()}-${String(parsedDate.getMonth()+1).padStart(2,'0')}-${String(parsedDate.getDate()).padStart(2,'0')}`:'');
         return {date,line:String(row.Line||'').trim(),fromHour:Number.parseInt(row.FromHour,10)||0,toHour:Number.parseInt(row.ToHour,10)||0,targetShift:String(row.TargetShift||'').trim()==='Night'?'Night':'Day'};
       }).filter(row=>row.date&&row.line);
-    } catch { return []; }
+      return {transfers,error:''};
+    } catch (error) { return {transfers:[],error:error.message||'อ่านรายการโอนกะไม่สำเร็จ'}; }
   }
 
   async function loadJobOrderDataset(onProgress = () => {}) {
@@ -333,18 +334,19 @@
     const values=[];
     for(let offset=0;offset<chunks.length;offset+=4){
       const batch=chunks.slice(offset,offset+4);
-      const result=await Promise.all(batch.map(chunk=>sheetValues(chunk.range,spreadsheetId)));
+      const result=await Promise.all(batch.map(chunk=>sheetValues(chunk.range,spreadsheetId,'FORMATTED_VALUE')));
       result.forEach(part=>values.push(...part));
       onProgress(Math.min(offset+batch.length,total),total,Math.min((offset+batch.length)*chunkSize,rowCount),rowCount);
     }
     if (!values.length) throw new Error(`แท็บ ${config.jobOrderSheetName} ไม่มีแถวข้อมูล`);
     const parsed=window.PL_WORKBOOK.parseBarcodeLog(values);
-    const transfers=await loadJobOrderShiftTransfers();
+    const transferData=await loadJobOrderShiftTransfers();
+    const transfers=transferData.transfers;
     const hoursInRange=(from,to)=>{const hours=[];for(let i=0,h=((from%24)+24)%24;i<24&&h!==((to%24)+24)%24;i++,h=(h+1)%24)hours.push(h);return hours;};
     const shiftByDateLineHour=new Map();
     for(const transfer of transfers)for(const hour of hoursInRange(transfer.fromHour,transfer.toHour))shiftByDateLineHour.set(`${transfer.date}_${transfer.line}_${hour}`,transfer.targetShift);
     parsed.records.forEach(record=>{record.shift=shiftByDateLineHour.get(`${record.date}_${record.line}_${Number(record.time.slice(0,2))}`)||record.shift;});
-    return {...parsed,sourceTitle:`${metadata.properties?.title||'barcode record'} · ${config.jobOrderSheetName}`,sourceSpreadsheetId:spreadsheetId,sourceRange:`${config.jobOrderSheetName}!A1:H${rowCount}`,shiftTransfersApplied:transfers.length};
+    return {...parsed,sourceTitle:`${metadata.properties?.title||'barcode record'} · ${config.jobOrderSheetName}`,sourceSpreadsheetId:spreadsheetId,sourceRange:`${config.jobOrderSheetName}!A1:H${rowCount}`,shiftTransferRules:transfers.length,shiftTransferError:transferData.error};
   }
 
   async function connect({ reuseAuthorization = false } = {}) {
@@ -382,7 +384,7 @@
       document.querySelector('#refresh-data').hidden = false;
       document.querySelector('#connection-status').innerHTML = '<i></i>Google Sheets เชื่อมต่อแล้ว';
       const app = document.createElement('script');
-      app.src = 'app.js?v=20261013e';
+      app.src = 'app.js?v=20261013f';
       app.onerror = () => { gate.hidden = false; document.querySelector('#main').hidden = true; setMessage('เปิดหน้าเว็บไม่สำเร็จ ลองโหลดหน้าใหม่', true); };
       document.body.appendChild(app);
     } catch (error) {
