@@ -4,7 +4,6 @@
   const gate = document.querySelector('#connect-gate');
   const message = document.querySelector('#connect-message');
   const signIn = document.querySelector('#google-signin');
-  const autoLoginDisabledKey = 'pl-google-auto-login-disabled-v1';
   const rememberedFileKey = 'pl-google-selected-file-v1';
   let accessToken = null;
   let tokenClient = null;
@@ -330,7 +329,6 @@
         window.PL_DATA.jobOrder = {status:'unavailable',records:[],rowCount:0,firstDate:'',lastDate:'',loadedAt:new Date().toISOString(),error:error.message||'โหลดข้อมูลรายวันไม่สำเร็จ'};
       }
       writeLocal(rememberedFileKey, config.spreadsheetId);
-      removeLocal(autoLoginDisabledKey);
       window.PL_DB = {
         connected: true,
         savePlan: appendPlan,
@@ -338,7 +336,7 @@
       gate.hidden = true;
       document.querySelector('#main').hidden = false;
       document.querySelector('#connection-status').hidden = false;
-      document.querySelector('#disconnect').hidden = false;
+      document.querySelector('#refresh-data').hidden = false;
       document.querySelector('#connection-status').innerHTML = '<i></i>Google Sheets เชื่อมต่อแล้ว';
       const app = document.createElement('script');
       app.src = 'app.js';
@@ -359,20 +357,17 @@
     setMessage('ต้องตั้งค่า OAuth Client ID, API Key และ Project Number ใน pl-settings.js ก่อนใช้งาน');
   } else {
     loadGoogleServices().then(() => {
-      if (readLocal(autoLoginDisabledKey) === '1') {
-        signIn.disabled = false;
-        setMessage('เข้าสู่ระบบแล้วเลือกฐานข้อมูล Department P&L Database เพื่อให้สิทธิ์เฉพาะไฟล์นี้');
-      } else {
-        setMessage(readLocal(rememberedFileKey) === config.spreadsheetId
-          ? 'พบฐานข้อมูลที่เคยเลือก กำลังเชื่อมต่ออัตโนมัติ…'
-          : 'กำลังตรวจการอนุญาต Google ที่เคยให้ไว้…');
-        connect({ silent: true });
-      }
+      // Older builds stored a permanent opt-out after disconnecting. Clear it so
+      // a one-time sign-in can reconnect silently on later visits again.
+      removeLocal('pl-google-auto-login-disabled-v1');
+      setMessage(readLocal(rememberedFileKey) === config.spreadsheetId
+        ? 'พบฐานข้อมูลที่เคยเลือก กำลังเชื่อมต่ออัตโนมัติ…'
+        : 'กำลังตรวจการอนุญาต Google ที่เคยให้ไว้…');
+      connect({ silent: true });
     }).catch(error => setMessage(error.message, true));
   }
   signIn.addEventListener('click', connect);
-  document.querySelector('#disconnect').addEventListener('click', () => {
-    writeLocal(autoLoginDisabledKey, '1');
+  document.querySelector('#refresh-data').addEventListener('click', () => {
     location.reload();
   });
 })();
