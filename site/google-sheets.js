@@ -3,6 +3,10 @@
   const config = window.PL_CONFIG || {};
   const gate = document.querySelector('#connect-gate');
   const message = document.querySelector('#connect-message');
+  const messageText = document.querySelector('#connect-message-text');
+  const connectProgress = document.querySelector('#connect-progress');
+  const connectProgressBar = document.querySelector('#connect-progress-bar');
+  const connectProgressValue = document.querySelector('#connect-progress-value');
   const signIn = document.querySelector('#google-signin');
   const rememberedFileKey = 'pl-google-selected-file-v1';
   const rememberedJobOrderFileKey = 'pl-google-job-order-file-v1';
@@ -12,9 +16,20 @@
   let needsAccountPicker = false;
   const planHeaders = ['record_id','scope_id','plan_name','saved_at','volume_pct','price_pct','raw_material_pct','labor_pct','fixed_cost_pct','initiatives_json'];
 
-  function setMessage(text, error = false) {
-    message.textContent = text;
+  function setMessage(text, error = false, percent = null) {
+    messageText.textContent = text;
     message.classList.toggle('error', error);
+    const loading = Number.isFinite(percent);
+    connectProgress.hidden = !loading;
+    if (loading) {
+      const value = Math.max(0, Math.min(100, Math.round(percent)));
+      connectProgress.setAttribute('role', 'progressbar');
+      connectProgress.setAttribute('aria-valuemin', '0');
+      connectProgress.setAttribute('aria-valuemax', '100');
+      connectProgress.setAttribute('aria-valuenow', String(value));
+      connectProgressBar.style.width = `${value}%`;
+      connectProgressValue.textContent = `${value}%`;
+    }
   }
 
   function loadScript(src) {
@@ -208,7 +223,7 @@
     window.PL_SAVED_BY_SCOPE = savedByScope;
   }
 
-  async function loadNativeDataset(metadata) {
+  async function loadNativeDataset(metadata, onProgress = () => {}) {
     const ranges = metadata.sheets.filter(s => ['BP บริษัท A','BP บริษัท A (PD)','Sale Price'].includes(s.properties.title)).map(({properties:p}) => {
       const cols = Math.min(p.gridProperties.columnCount, p.title === 'Sale Price' ? 17 : 74);
       return `${quoted(p.title)}!A1:${window.PL_WORKBOOK.columnName(cols-1)}${p.gridProperties.rowCount}`;
@@ -216,25 +231,32 @@
     const query = new URLSearchParams({includeGridData:'true',fields:'sheets(properties(title),data(startRow,startColumn,rowData(values(effectiveValue))))'});
     ranges.forEach(range => query.append('ranges',range));
     const planSheet = metadata.sheets.find(s => s.properties.title === 'business_plans');
+    onProgress({percent:15,message:'กำลังอ่านตาราง P&L จาก Google Sheets…'});
     const [grid,planRows] = await Promise.all([
       spreadsheetRequest('?' + query.toString()),
       planSheet ? sheetValues(`'business_plans'!A1:J${planSheet.properties.gridProperties.rowCount}`) : Promise.resolve([]),
     ]);
+    onProgress({percent:78,message:'อ่านชีตแล้ว กำลังจัดรูปข้อมูล…'});
     const dataset = window.PL_WORKBOOK.nativeDataset(metadata,grid.sheets || []);
     savedPlans(planRows,dataset.year);
+    onProgress({percent:94,message:'เตรียมข้อมูล P&L เสร็จแล้ว…'});
     return dataset;
   }
 
-  async function loadDataset() {
+  async function loadDataset(onProgress = () => {}) {
+    onProgress({percent:2,message:'กำลังอ่านโครงสร้าง Google Sheets…'});
     const sheetMeta = await readMetadata();
+    onProgress({percent:8,message:'อ่านโครงสร้าง Google Sheets แล้ว…'});
     const titles = sheetMeta.sheets.map(s => s.properties.title);
-    if (titles.some(name => ['BP บริษัท A','BP บริษัท A (PD)'].includes(name))) return loadNativeDataset(sheetMeta);
+    if (titles.some(name => ['BP บริษัท A','BP บริษัท A (PD)'].includes(name))) return loadNativeDataset(sheetMeta,onProgress);
     if (!titles.includes('pnl') || !titles.includes('accounts')) throw new Error('โครงสร้างชีตไม่ตรงกับตาราง P&L ที่เว็บรองรับ');
+    onProgress({percent:15,message:'กำลังอ่านตาราง P&L และราคาสินค้า…'});
     const [pnlRows, accountRows, productRows, sourceRows, errorRows, planRows, metadataRows] = await Promise.all([
       sheetValues('pnl!A1:S'), sheetValues('accounts!A1:F'), sheetValues('products!A1:H'),
       sheetValues('source_sheets!A1:E'), sheetValues('source_errors!A1:C'),
       titles.includes('business_plans') ? sheetValues('business_plans!A1:J') : Promise.resolve([]), sheetValues('metadata!A1:B'),
     ]);
+    onProgress({percent:78,message:'อ่านชีตแล้ว กำลังสรุปข้อมูล…'});
     const records = toObjects(pnlRows);
     const accounts = toObjects(accountRows).map(a => ({
       key: a.account_key, row: asNumber(a.source_row), label: a.account_name_th,
@@ -276,6 +298,7 @@
     }
     const metadata = Object.fromEntries(toObjects(metadataRows).map(row => [row.key, row.value]));
     savedPlans(planRows,asNumber(metadata.fiscal_year) || 2022);
+    onProgress({percent:94,message:'เตรียมข้อมูล P&L เสร็จแล้ว…'});
     return {
       source: metadata.source_file || 'Department P&L Database',
       year: asNumber(metadata.fiscal_year) || 2022,
@@ -321,32 +344,59 @@
   async function loadJobOrderDataset(onProgress = () => {}) {
     const spreadsheetId=config.jobOrderSpreadsheetId;
     if (!spreadsheetId) return {status:'not-configured',records:[],rowCount:0,firstDate:'',lastDate:'',loadedAt:new Date().toISOString()};
+    onProgress({percent:2,message:'กำลังอ่านโครงสร้าง barcode record · Log…'});
     const fields='spreadsheetId,properties(title),sheets(properties(title,gridProperties(rowCount,columnCount)))';
     const metadata=await spreadsheetRequest(`?fields=${encodeURIComponent(fields)}`,{},spreadsheetId);
     const sheet=metadata.sheets?.find(item=>item.properties?.title===config.jobOrderSheetName);
     if (!sheet) throw new Error(`ไม่พบแท็บ ${config.jobOrderSheetName} ใน ${metadata.properties?.title||'ไฟล์ต้นทาง'}`);
     const rowCount=Number(sheet.properties.gridProperties?.rowCount)||0;
-    const chunkSize=10000,total=Math.max(1,Math.ceil(Math.max(1,rowCount)/chunkSize)),chunks=[];
+    onProgress({percent:6,message:`พบข้อมูล ${new Intl.NumberFormat('th-TH').format(rowCount)} แถว กำลังอ่าน Log…`});
+    const chunkSize=1000,total=Math.max(1,Math.ceil(Math.max(1,rowCount)/chunkSize)),chunks=[];
     for(let index=0;index<total;index++){
       const start=index*chunkSize+1,end=Math.min((index+1)*chunkSize,Math.max(rowCount,1));
       chunks.push({range:`'${config.jobOrderSheetName.replaceAll("'","''")}'!A${start}:H${end}`});
     }
-    const values=[];
+    const values=[];let completed=0;
     for(let offset=0;offset<chunks.length;offset+=4){
       const batch=chunks.slice(offset,offset+4);
-      const result=await Promise.all(batch.map(chunk=>sheetValues(chunk.range,spreadsheetId,'FORMATTED_VALUE')));
+      const result=await Promise.all(batch.map(async chunk=>{
+        const part=await sheetValues(chunk.range,spreadsheetId,'FORMATTED_VALUE');
+        completed++;
+        const percent=Math.round(6+82*completed/total);
+        onProgress({percent,message:`กำลังอ่าน barcode record · Log ${new Intl.NumberFormat('th-TH').format(Math.min(completed*chunkSize,rowCount))}/${new Intl.NumberFormat('th-TH').format(rowCount)} แถว…`});
+        return part;
+      }));
       result.forEach(part=>values.push(...part));
-      onProgress(Math.min(offset+batch.length,total),total,Math.min((offset+batch.length)*chunkSize,rowCount),rowCount);
     }
     if (!values.length) throw new Error(`แท็บ ${config.jobOrderSheetName} ไม่มีแถวข้อมูล`);
+    onProgress({percent:91,message:'กำลังใช้กฎกรองและจัดกลุ่มรายการผลิต…'});
     const parsed=window.PL_WORKBOOK.parseBarcodeLog(values);
+    onProgress({percent:96,message:'กำลังอ่านรายการโอนกะ…'});
     const transferData=await loadJobOrderShiftTransfers();
     const transfers=transferData.transfers;
     const hoursInRange=(from,to)=>{const hours=[];for(let i=0,h=((from%24)+24)%24;i<24&&h!==((to%24)+24)%24;i++,h=(h+1)%24)hours.push(h);return hours;};
     const shiftByDateLineHour=new Map();
     for(const transfer of transfers)for(const hour of hoursInRange(transfer.fromHour,transfer.toHour))shiftByDateLineHour.set(`${transfer.date}_${transfer.line}_${hour}`,transfer.targetShift);
     parsed.records.forEach(record=>{record.shift=shiftByDateLineHour.get(`${record.date}_${record.line}_${Number(record.time.slice(0,2))}`)||record.shift;});
+    onProgress({percent:100,message:'โหลดข้อมูลการผลิตครบแล้ว'});
     return {...parsed,sourceTitle:`${metadata.properties?.title||'barcode record'} · ${config.jobOrderSheetName}`,sourceSpreadsheetId:spreadsheetId,sourceRange:`${config.jobOrderSheetName}!A1:H${rowCount}`,shiftTransferRules:transfers.length,shiftTransferError:transferData.error};
+  }
+
+  let jobOrderPromise=null;
+  async function loadJobOrder(onProgress=()=>{}) {
+    if(window.PL_DATA?.jobOrder?.status==='loaded')return window.PL_DATA.jobOrder;
+    if(jobOrderPromise)return jobOrderPromise;
+    jobOrderPromise=(async()=>{
+      if(readLocal(rememberedJobOrderFileKey)!==config.jobOrderSpreadsheetId){
+        await selectGoogleSheet(config.jobOrderSpreadsheetId,'barcode record');
+        writeLocal(rememberedJobOrderFileKey,config.jobOrderSpreadsheetId);
+      }
+      const data=await loadJobOrderDataset(onProgress);
+      return data;
+    })();
+    try{return await jobOrderPromise;}
+    catch(error){if(/401|403|permission|access/i.test(error.message||''))removeLocal(rememberedJobOrderFileKey);throw error;}
+    finally{jobOrderPromise=null;}
   }
 
   async function connect({ reuseAuthorization = false } = {}) {
@@ -365,26 +415,24 @@
         setMessage('เลือกไฟล์ barcode record ใน Google Drive เพื่ออ่านแท็บ Log…');
         await selectGoogleSheet(config.jobOrderSpreadsheetId,'barcode record');
       }
-      setMessage('กำลังอ่านข้อมูลจากชีต…');
-      window.PL_DATA = await loadDataset();
-      try {
-        window.PL_DATA.jobOrder = await loadJobOrderDataset((done,total,loaded,rowCount)=>setMessage(`กำลังอ่าน barcode record · Log ${new Intl.NumberFormat('th-TH').format(Math.min(loaded,rowCount))}/${new Intl.NumberFormat('th-TH').format(rowCount)} แถว (${done}/${total} ชุด)…`));
-        writeLocal(rememberedJobOrderFileKey, config.jobOrderSpreadsheetId);
-      } catch (error) {
-        window.PL_DATA.jobOrder = {status:'unavailable',records:[],rowCount:0,firstDate:'',lastDate:'',loadedAt:new Date().toISOString(),error:error.message||'โหลดข้อมูลรายวันไม่สำเร็จ'};
-        if (/401|403|permission|access/i.test(error.message||'')) removeLocal(rememberedJobOrderFileKey);
-      }
+      setMessage('กำลังอ่านข้อมูลจาก Google Sheets…',false,0);
+      window.PL_DATA = await loadDataset(progress=>setMessage(progress.message,false,progress.percent));
+      window.PL_DATA.jobOrder = {status:'not-loaded',records:[],rowCount:0,firstDate:'',lastDate:'',loadedAt:''};
       window.PL_DB = {
         connected: true,
         savePlan: appendPlan,
+        loadJobOrder,
       };
-      gate.hidden = true;
-      document.querySelector('#main').hidden = false;
+      setMessage('กำลังเปิดหน้าสรุป…',false,98);
       document.querySelector('#connection-status').hidden = false;
       document.querySelector('#refresh-data').hidden = false;
       document.querySelector('#connection-status').innerHTML = '<i></i>Google Sheets เชื่อมต่อแล้ว';
       const app = document.createElement('script');
-      app.src = 'app.js?v=20261013h';
+      app.src = 'app.js?v=20261013i';
+      app.onload = () => {
+        setMessage('โหลดข้อมูลพร้อมแล้ว',false,100);
+        setTimeout(()=>{gate.hidden=true;document.querySelector('#main').hidden=false;},220);
+      };
       app.onerror = () => { gate.hidden = false; document.querySelector('#main').hidden = true; setMessage('เปิดหน้าเว็บไม่สำเร็จ ลองโหลดหน้าใหม่', true); };
       document.body.appendChild(app);
     } catch (error) {
