@@ -8,6 +8,7 @@
   let accessToken = null;
   let tokenClient = null;
   let dbMetadata = null;
+  let needsAccountPicker = false;
   const planHeaders = ['record_id','scope_id','plan_name','saved_at','volume_pct','price_pct','raw_material_pct','labor_pct','fixed_cost_pct','initiatives_json'];
 
   function setMessage(text, error = false) {
@@ -67,16 +68,10 @@
   }
 
   async function authenticatedFetch(url, options = {}) {
-    const send = () => fetch(url, {
+    return fetch(url, {
       ...options,
       headers: { ...(options.headers || {}), Authorization: `Bearer ${accessToken}` },
     });
-    let response = await send();
-    if (response.status === 401) {
-      await requestAccessToken('none');
-      response = await send();
-    }
-    return response;
   }
 
   function selectDatabaseFile() {
@@ -310,14 +305,14 @@
     return {...window.PL_WORKBOOK.parseJobOrderCsv(await response.text()),sourceUrl:config.jobOrderCsvUrl};
   }
 
-  async function connect({ silent = false } = {}) {
+  async function connect({ reuseAuthorization = false } = {}) {
     let tokenReceived = false;
     signIn.disabled = true;
-    setMessage(silent ? 'กำลังเชื่อมต่อ Google อัตโนมัติ…' : 'กำลังเข้าสู่ระบบและอ่านข้อมูลจากชีต…');
+    setMessage(reuseAuthorization ? 'กำลังเชื่อมต่อ Google ด้วยสิทธิ์เดิม…' : 'กำลังเข้าสู่ระบบและอ่านข้อมูลจากชีต…');
     try {
-      await requestAccessToken(silent ? 'none' : 'select_account');
+      await requestAccessToken(reuseAuthorization ? 'none' : 'select_account');
       tokenReceived = true;
-      if (!silent) {
+      if (!reuseAuthorization) {
         setMessage('เลือกฐานข้อมูล Department P&L Database ใน Google Drive…');
         await selectDatabaseFile();
       }
@@ -343,12 +338,14 @@
       app.onerror = () => { gate.hidden = false; document.querySelector('#main').hidden = true; setMessage('เปิดหน้าเว็บไม่สำเร็จ ลองโหลดหน้าใหม่', true); };
       document.body.appendChild(app);
     } catch (error) {
-      if (silent && tokenReceived && /401|403|permission|access/i.test(error.message || '')) removeLocal(rememberedFileKey);
-      if (silent) {
-        const reason = error.message ? `: ${error.message}` : '';
-        setMessage(`เชื่อมต่ออัตโนมัติไม่สำเร็จ${reason} กด “เข้าสู่ระบบ Google” เพื่อดำเนินการต่อ`, true);
+      const reason = error.message ? `: ${error.message}` : '';
+      const canReuseFailed = reuseAuthorization && /popup|login|required|401|403|permission|access/i.test(error.message || '');
+      if (canReuseFailed) {
+        needsAccountPicker = true;
+        if (tokenReceived && /401|403|permission|access/i.test(error.message || '')) removeLocal(rememberedFileKey);
+        setMessage(`เชื่อมต่อด้วยสิทธิ์เดิมไม่สำเร็จ${reason} กดอีกครั้งเพื่อเลือกบัญชี Google และยืนยันสิทธิ์ใหม่`, true);
       } else {
-        setMessage(error.message || 'เชื่อมต่อ Google Sheets ไม่สำเร็จ ตรวจ Client ID และสิทธิ์ในชีต', true);
+        setMessage(`เชื่อมต่อ Google Sheets ไม่สำเร็จ${reason} กดปุ่มเพื่อลองอีกครั้ง`, true);
       }
       signIn.disabled = false;
     }
@@ -358,16 +355,20 @@
     setMessage('ต้องตั้งค่า OAuth Client ID, API Key และ Project Number ใน pl-settings.js ก่อนใช้งาน');
   } else {
     loadGoogleServices().then(() => {
-      // Older builds stored a permanent opt-out after disconnecting. Clear it so
-      // a one-time sign-in can reconnect silently on later visits again.
+      // Ignore the permanent opt-out written by older builds. Reconnection is
+      // started by the user so the browser can open Google's authorization UI.
       removeLocal('pl-google-auto-login-disabled-v1');
+      signIn.disabled = false;
       setMessage(readLocal(rememberedFileKey) === config.spreadsheetId
-        ? 'พบฐานข้อมูลที่เคยเลือก กำลังเชื่อมต่ออัตโนมัติ…'
-        : 'กำลังตรวจการอนุญาต Google ที่เคยให้ไว้…');
-      connect({ silent: true });
+        ? 'เคยเชื่อมต่อแล้ว กดปุ่มเพื่อเปิดข้อมูลด้วยสิทธิ์เดิม โดยไม่ต้องเลือกชีตซ้ำ'
+        : 'กดปุ่มเพื่อเข้าสู่ระบบ Google และเลือกฐานข้อมูล Department P&L Database ครั้งแรก');
     }).catch(error => setMessage(error.message, true));
   }
-  signIn.addEventListener('click', connect);
+  signIn.addEventListener('click', () => {
+    const hasRememberedFile = readLocal(rememberedFileKey) === config.spreadsheetId;
+    const reuseAuthorization = hasRememberedFile && !needsAccountPicker;
+    connect({ reuseAuthorization });
+  });
   document.querySelector('#refresh-data').addEventListener('click', () => {
     location.reload();
   });
