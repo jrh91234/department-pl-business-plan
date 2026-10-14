@@ -32,45 +32,64 @@
     for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) result = String.fromCharCode(65 + (n - 1) % 26) + result;
     return result;
   }
-  function decodeGrid(sheet) {
-    const rows = [], errors = [];
-    const codes = { REF:'#REF!', DIVIDE_BY_ZERO:'#DIV/0!', VALUE:'#VALUE!', N_A:'#N/A', NAME:'#NAME?', NUM:'#NUM!', ERROR:'#ERROR!', NULL_VALUE:'#NULL!' };
-    for (const block of sheet.data || []) {
-      (block.rowData || []).forEach((row, i) => {
-        const rowIndex = (block.startRow || 0) + i;
-        rows[rowIndex] ||= [];
-        (row.values || []).forEach((cell, j) => {
-          const colIndex = (block.startColumn || 0) + j;
-          const value = cell.effectiveValue;
-          rows[rowIndex][colIndex] = value?.numberValue ?? value?.stringValue ?? value?.boolValue ?? null;
-          if (value?.errorValue) {
-            const error = codes[value.errorValue.type] || '#ERROR!';
-            rows[rowIndex][colIndex] = error;
-            errors.push({sheet:sheet.properties.title, cell:columnName(colIndex) + (rowIndex + 1), error, message:value.errorValue.message || ''});
-          }
-        });
-      });
-    }
-    return { rows, errors };
+  // Line items the PD department fills by hand, in the order of the "BP บริษัท A" template.
+  // Subtotals (VC, CM, FC, Profit, Net) are always computed so the sheet cannot drift from the web.
+  const SHEET_LABELS = {
+    revenue:'REVENUES', rm:'Raw material consumed', labor:'Direct labour', ot:'Overtime direct',
+    sc:'Direct labour - SCAN', scot:'Overtime direct - SCAN', ohvc:'OH VC', selling:'Selling expenses',
+    ohfc:'OH FC', admin:'Admin FC', center3:'Center Expenses_แบ่ง 3', center7:'Center Expenses_แบ่ง 7',
+    impairment:'Loss on impairment of assets', other:'Other income', extra:'Extra', interest:'Interest', tax:'Tax',
+  };
+  const INPUT_KEYS = DEFINITIONS.filter(([, , , type]) => type === 'income' || type === 'expense').map(([key]) => key);
+  const LABOR_KEYS = ['labor','ot','sc','scot'];
+  const VC_KEYS = ['rm','labor','ot','sc','scot','ohvc','selling'];
+  const FC_KEYS = ['ohfc','admin','center3','center7','impairment'];
+  const inputSheetName = year => `PL Input ${year}`;
+  const AUTO_REVENUE = 'อัตโนมัติ';
+  function inputTemplate(year) {
+    const header = ['key','รายการ','ชื่อใน BP บริษัท A',...MONTHS.map(m => `${m} Actual`),...MONTHS.map(m => `${m} BP`)];
+    const rows = DEFINITIONS.filter(([key]) => INPUT_KEYS.includes(key)).map(([key,label]) => [
+      key, label, SHEET_LABELS[key],
+      ...MONTHS.map(() => key === 'revenue' ? AUTO_REVENUE : ''),
+      ...MONTHS.map(() => ''),
+    ]);
+    return [
+      [`P&L Input · แผนก PD · ปี ${year}`],
+      ['กรอกเป็นบาท ค่าใช้จ่ายใส่เป็นค่าบวก · รายได้ Actual คำนวณจากยอดผลิต × ราคา FC ใน Sale Price · ค่าแรงใส่เฉพาะยอดรวมต่อเดือน (รายละเอียดกำลังคนเก็บในแท็บอื่นที่เว็บไม่อ่าน) · ช่องว่างนับเป็น 0 ในยอดรวม'],
+      header, ...rows,
+    ];
   }
-  function parseScope(rows, id, sheet, label) {
-    const headerIndex = rows.findIndex((row, i) => row && MONTHS.every(month => row.some((v, c) => text(v) === month && text(rows[i+1]?.[c]) === 'BP')));
-    if (headerIndex < 0) throw new Error(`${sheet}: ไม่พบหัวตาราง BP ครบ 12 เดือน`);
-    const headers = rows[headerIndex], kinds = rows[headerIndex + 1];
-    const yearLabel = headers.map(text).find(v => /^Y\s*20\d{2}$/i.test(v));
-    if (!yearLabel) throw new Error(`${sheet}: ไม่พบปีของตาราง P&L เช่น Y2022`);
-    const year = Number(yearLabel.match(/20\d{2}/)[0]);
-    const rowByKey = Object.fromEntries(DEFINITIONS.map(([key, , , , pattern]) => [key, rows.findIndex((r, i) => i > headerIndex + 1 && r?.slice(0,4).some(v => pattern.test(text(v)))) + 1]));
-    for (const key of ['revenue','vc','cm','fc','profit','net']) if (!rowByKey[key]) throw new Error(`${sheet}: ไม่พบรายการ ${key} ในตาราง P&L`);
-    const periods = MONTHS.map(month => {
-      const bpIndex = headers.findIndex((v, i) => text(v) === month && text(kinds[i]) === 'BP');
-      const offset = kinds.slice(bpIndex+1,bpIndex+4).findIndex(v => /^(Actual|Forecast)$/i.test(text(v)));
-      if (offset < 0) throw new Error(`${sheet}: ไม่พบ Actual/Forecast ของ ${month}`);
-      const resultIndex = bpIndex + offset + 1;
-      const values = index => Object.fromEntries(DEFINITIONS.map(([key]) => [key, rowByKey[key] ? number(rows[rowByKey[key]-1]?.[index]) : null]));
-      return {month,bpCol:columnName(bpIndex),resultCol:columnName(resultIndex),kind:/^Actual$/i.test(text(kinds[resultIndex]))?'Actual':'Forecast',bp:values(bpIndex),result:values(resultIndex),unitsBP:number(rows[headerIndex-2]?.[bpIndex]),unitsResult:number(rows[headerIndex-2]?.[resultIndex])};
+  function groupSum(values, keys) {
+    const entered = keys.map(key => values[key]).filter(value => number(value) !== null);
+    return entered.length ? entered.reduce((a, b) => a + b, 0) : null;
+  }
+  function computeTotals(values) {
+    const out = {...values};
+    out.vc = groupSum(out, VC_KEYS);
+    out.fc = groupSum(out, FC_KEYS);
+    out.cm = number(out.revenue) !== null && out.vc !== null ? out.revenue - out.vc : null;
+    out.profit = out.cm !== null && out.fc !== null ? out.cm - out.fc : null;
+    out.net = out.profit !== null ? out.profit + (out.other ?? 0) - (out.extra ?? 0) - (out.interest ?? 0) - (out.tax ?? 0) : null;
+    return out;
+  }
+  function parseInputSheet(rows, year, today = new Date()) {
+    const sheet = inputSheetName(year);
+    const headerIndex = (rows || []).findIndex(row => row?.some(v => text(v) === 'Jan Actual'));
+    const headers = headerIndex >= 0 ? rows[headerIndex].map(text) : [];
+    const rowByKey = {};
+    if (headerIndex >= 0) rows.forEach((row, i) => {
+      const key = text(row?.[0]);
+      if (i > headerIndex && INPUT_KEYS.includes(key) && !rowByKey[key]) rowByKey[key] = i + 1;
     });
-    return {id,label,sheet,year,rowByKey,periods};
+    const closedMonths = year < today.getFullYear() ? 12 : year > today.getFullYear() ? 0 : today.getMonth() + 1;
+    const periods = MONTHS.map((month, m) => {
+      const resultIndex = headers.indexOf(`${month} Actual`), bpIndex = headers.indexOf(`${month} BP`);
+      const values = index => Object.fromEntries(INPUT_KEYS.map(key => [key, index >= 0 && rowByKey[key] ? number(rows[rowByKey[key]-1]?.[index]) : null]));
+      const result = values(resultIndex);
+      result.revenue = null; // Filled from production × Sale Price once the barcode Log is read.
+      return {month,bpCol:bpIndex >= 0 ? columnName(bpIndex) : '',resultCol:resultIndex >= 0 ? columnName(resultIndex) : '',kind:m < closedMonths ? 'Actual' : 'Forecast',bp:computeTotals(values(bpIndex)),result:computeTotals(result),unitsBP:null,unitsResult:null};
+    });
+    return {id:'pd',label:'แผนก PD',sheet,year,rowByKey,periods,missing:headerIndex < 0};
   }
   function parseProducts(rows) {
     const keyOf = model => text(model).replace(/-S$/i,'').toUpperCase();
@@ -312,22 +331,22 @@
     const dates=records.map(record=>record.date).sort();
     return {status:'loaded',records,rowCount:rawRows,voidRows,ignoredRows,firstDate:dates[0]||'',lastDate:dates.at(-1)||'',loadedAt:new Date().toISOString()};
   }
-  function nativeDataset(metadata, gridSheets) {
-    const grids = Object.fromEntries(gridSheets.map(s => [s.properties.title,decodeGrid(s)]));
-    const configs = [['pd','BP บริษัท A (PD)','แผนก PD'],['company','BP บริษัท A','บริษัท A (ภาพรวม)']];
-    const scopes = configs.filter(([,name]) => grids[name]).map(([id,name,label]) => parseScope(grids[name].rows,id,name,label));
-    if (!scopes.length) throw new Error('ไม่พบแท็บ P&L ที่เว็บรองรับ');
-    if (new Set(scopes.map(s=>s.year)).size !== 1) throw new Error('ปีของตาราง P&L แต่ละหน่วยงานไม่ตรงกัน');
-    const sale = grids['Sale Price']?.rows || [];
+  function inputDataset(metadata, {year, inputRows = [], saleRows = [], today = new Date()} = {}) {
+    const scope = parseInputSheet(inputRows, year, today);
+    const isError = v => typeof v === 'string' && /^#(REF!|DIV\/0!|VALUE!|N\/A|NAME\?|NUM!|ERROR!|NULL!)$/.test(v.trim());
+    const errorsIn = (title, rows) => rows.flatMap((row, r) => (row || []).map((v, c) => isError(v) ? {sheet:title,cell:columnName(c)+(r+1),error:v.trim()} : null).filter(Boolean));
+    const errors = [...errorsIn('Sale Price', saleRows), ...errorsIn(scope.sheet, inputRows)];
+    const read = {'Sale Price':'A1:Q', [scope.sheet]:'A1:AA', business_plans:'A1:J'};
     return {
-      source:metadata.properties.title,spreadsheetId:metadata.spreadsheetId,year:scopes[0].year,currency:'THB',schema:'native-workbook',loadedAt:new Date().toISOString(),
-      rows:DEFINITIONS.map(([key,label,en,type],order)=>({key,label,en,type,order,row:scopes[0].rowByKey[key]})),scopes,
-      products:parseProducts(sale),exchangeBP:number(sale[0]?.[6]),exchangeFC:number(sale[0]?.[14]),
-      errors:Object.values(grids).flatMap(g=>g.errors),
-      sources:metadata.sheets.map(({properties:p})=>({name:p.title,sheetId:p.sheetId,dimension:`A1:${columnName(p.gridProperties.columnCount-1)}${p.gridProperties.rowCount}`,hidden:!!p.hidden,errors:grids[p.title]?.errors.length??null,scope:grids[p.title]?'ตรวจเฉพาะช่วงที่เว็บอ่าน':'ยังไม่ได้ตรวจสูตร',checkedRange:grids[p.title]?`A1:${columnName(Math.min(p.gridProperties.columnCount,p.title==='Sale Price'?17:74)-1)}${p.gridProperties.rowCount}`:null})),
+      source:metadata.properties.title,spreadsheetId:metadata.spreadsheetId,year,currency:'THB',schema:'pl-input',loadedAt:new Date().toISOString(),
+      rows:DEFINITIONS.map(([key,label,en,type],order)=>({key,label,en,type,order,row:scope.rowByKey[key]||null,input:INPUT_KEYS.includes(key),labor:LABOR_KEYS.includes(key)})),
+      scopes:[scope],inputSheet:scope.sheet,inputMissing:scope.missing,
+      products:parseProducts(saleRows),exchangeBP:number(saleRows[0]?.[6]),exchangeFC:number(saleRows[0]?.[14]),
+      errors,
+      sources:metadata.sheets.map(({properties:p})=>({name:p.title,sheetId:p.sheetId,dimension:`A1:${columnName(p.gridProperties.columnCount-1)}${p.gridProperties.rowCount}`,hidden:!!p.hidden,used:!!read[p.title],errors:read[p.title]?errors.filter(e=>e.sheet===p.title).length:null,checkedRange:read[p.title]||null})),
     };
   }
-  const api = {MONTHS,DEFINITIONS,columnName,decodeGrid,parseScope,parseProducts,parseCsvRows,parseJobOrderCsv,parseBarcodeLog,nativeDataset};
+  const api = {MONTHS,DEFINITIONS,INPUT_KEYS,LABOR_KEYS,AUTO_REVENUE,columnName,inputSheetName,inputTemplate,computeTotals,parseInputSheet,parseProducts,parseCsvRows,parseJobOrderCsv,parseBarcodeLog,inputDataset};
   if (typeof window !== 'undefined') window.PL_WORKBOOK = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

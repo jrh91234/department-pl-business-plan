@@ -4,36 +4,57 @@ const vm=require('node:vm');
 const fs=require('node:fs');
 const adapter=require('../site/workbook-data.js');
 
-async function connectFixture() {
-  const elements=new Map(),writes=[];
-  const element=id=>{if(!elements.has(id))elements.set(id,{hidden:false,disabled:true,classList:{toggle(){}},addEventListener(name,fn){this[name]=fn;}});return elements.get(id);};
-  const metadata={spreadsheetId:'fixture-id',properties:{title:'Test workbook'},sheets:[{properties:{title:'BP บริษัท A (PD)',sheetId:1,gridProperties:{rowCount:50,columnCount:80}}}]};
-  const rows=Array.from({length:40},()=>[]);
-  const labels=['REVENUES','Raw material consumed','Direct labour','Overtime direct','Direct labour - SCAN','Overtime direct - SCAN','OH VC','Selling expenses','VC total','CM','OH FC','Admin FC','Center Expenses_แบ่ง 3','Center Expenses_แบ่ง 7','Loss on impairment of assets','FC total','Profit','Other income','Extra','Interest','Tax','Net Profit'];
-  adapter.MONTHS.forEach((month,i)=>{const c=6+i*4;rows[3][c]=month;rows[4][c]='BP';rows[4][c+2]=i?'Forecast':'Actual';labels.forEach((label,j)=>{rows[j+6][1]=label;rows[j+6][c]=100;rows[j+6][c+2]=101;});});rows[3][54]='Y2035';
-  const grid={sheets:[{properties:{title:'BP บริษัท A (PD)'},data:[{rowData:rows.map(row=>({values:row.map(v=>({effectiveValue:typeof v==='number'?{numberValue:v}:{stringValue:v}}))}))}]}]};
-  let header=[];
+async function connectFixture({withInput=false}={}) {
+  const elements=new Map(),writes=[],reads=[];
+  const element=id=>{if(!elements.has(id))elements.set(id,{hidden:false,disabled:true,style:{},classList:{toggle(){}},setAttribute(){},addEventListener(name,fn){this[name]=fn;}});return elements.get(id);};
+  const year=new Date().getFullYear(),inputTitle=`PL Input ${year}`;
+  const sheet=(title,id)=>({properties:{title,sheetId:id,gridProperties:{rowCount:50,columnCount:30}}});
+  const metadata={spreadsheetId:'fixture-id',properties:{title:'Test workbook'},sheets:[sheet('Sale Price',1),sheet('Manpower',3)]};
+  if(withInput)metadata.sheets.push(sheet(inputTitle,4));
+  const sale=[[],[],[],[],[null,'M-S','Model',10,null,330,null,null,null,null,'M',null,10,null,320]];
+  let header=[],inputRows=withInput?adapter.inputTemplate(year):[];
   const response=(body,ok=true)=>({ok,status:ok?200:400,json:async()=>body});
   const fetch=async(url,opts={})=>{
     const uri=new URL(url), method=opts.method||'GET';
-    if(method!=='GET')writes.push({url,method,body:JSON.parse(opts.body)});
-    if(uri.pathname.endsWith(':batchUpdate')){metadata.sheets.push({properties:{title:'business_plans',sheetId:2,gridProperties:{rowCount:1000,columnCount:10}}});return response({replies:[{}]});}
-    if(uri.pathname.includes('/values/')){if(method==='PUT')header=JSON.parse(opts.body).values[0];return response(method==='GET'?{values:header.length?[header]:[]}:{updates:{updatedRows:1}});}
-    return response((uri.searchParams.get('fields')||'').includes('effectiveValue')?grid:structuredClone(metadata));
+    if(method!=='GET')writes.push({url:decodeURIComponent(url),method,body:JSON.parse(opts.body)});
+    if(uri.pathname.endsWith(':batchUpdate')){const title=JSON.parse(opts.body).requests[0].addSheet.properties.title;metadata.sheets.push(sheet(title,metadata.sheets.length+10));return response({replies:[{}]});}
+    if(uri.pathname.endsWith('values:batchGet')){const ranges=uri.searchParams.getAll('ranges');reads.push(...ranges);return response({valueRanges:ranges.map(r=>({values:r.startsWith("'Sale Price'")?sale:r.startsWith("'business_plans'")?(header.length?[header]:[]):inputRows}))});}
+    if(uri.pathname.includes('/values/')){const path=decodeURIComponent(uri.pathname);if(method==='PUT'&&path.includes('business_plans'))header=JSON.parse(opts.body).values[0];if(method==='PUT'&&path.includes('PL Input'))inputRows=JSON.parse(opts.body).values;return response(method==='GET'?{values:path.includes('PL Input')?inputRows:header.length?[header]:[]}:{updates:{updatedRows:1}});}
+    return response(structuredClone(metadata));
   };
   class View {setFileIds(){return this;}setMimeTypes(){return this;}setIncludeFolders(){return this;}setSelectFolderEnabled(){return this;}setMode(){return this;}}
-  class Picker {addView(){return this;}setMaxItems(){return this;}setLocale(){return this;}setDeveloperKey(){return this;}setAppId(){return this;}setOAuthToken(){return this;}setCallback(cb){this.callback=cb;return this;}build(){return {setVisible:()=>this.callback({action:'picked',docs:[{id:'fixture-id'}]})};}}
-  const window={PL_CONFIG:{googleClientId:'fixture',googleApiKey:'fixture',googleProjectNumber:'fixture',spreadsheetId:'fixture-id'},PL_WORKBOOK:adapter,gapi:{load:(name,opts)=>opts.callback()},google:{accounts:{oauth2:{initTokenClient:opts=>({requestAccessToken:()=>opts.callback({access_token:'fixture-token'})})}},picker:{DocsView:View,PickerBuilder:Picker,ViewId:{SPREADSHEETS:'sheets'},DocsViewMode:{LIST:'list'},Action:{PICKED:'picked',CANCEL:'cancel'}}}};
+  class Picker {addView(){return this;}setMaxItems(){return this;}setLocale(){return this;}setDeveloperKey(){return this;}setAppId(){return this;}setOAuthToken(){return this;}setCallback(cb){this.callback=cb;return this;}build(){return {setVisible:()=>this.callback({action:'picked',docs:[{id:this.id||'fixture-id'}]})};}}
+  const stored=new Map();
+  const window={PL_CONFIG:{googleClientId:'fixture',googleApiKey:'fixture',googleProjectNumber:'fixture',spreadsheetId:'fixture-id',jobOrderSpreadsheetId:'fixture-id',jobOrderSheetName:'Log'},PL_WORKBOOK:adapter,gapi:{load:(name,opts)=>opts.callback()},google:{accounts:{oauth2:{initTokenClient:opts=>({requestAccessToken:()=>opts.callback({access_token:'fixture-token'})})}},picker:{DocsView:View,PickerBuilder:Picker,ViewId:{SPREADSHEETS:'sheets'},DocsViewMode:{LIST:'list'},Action:{PICKED:'picked',CANCEL:'cancel'}}}};
   const document={querySelector:element,createElement:()=>({}),head:{appendChild:s=>s.onload()},body:{appendChild(){}}};
-  vm.runInNewContext(fs.readFileSync(require.resolve('../site/google-sheets.js'),'utf8'),{window,document,fetch,URLSearchParams,crypto:require('node:crypto').webcrypto,location:{reload(){}}});
+  const localStorage={getItem:k=>stored.get(k)??null,setItem:(k,v)=>stored.set(k,String(v)),removeItem:k=>stored.delete(k)};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../site/google-sheets.js'),'utf8'),{window,document,fetch,localStorage,setTimeout,URL,URLSearchParams,Intl,crypto:require('node:crypto').webcrypto,location:{reload(){}}});
   await new Promise(resolve=>setImmediate(resolve));
-  await element('#google-signin').click();
-  assert.ok(window.PL_DB?.connected);
-  return {window,writes,setHeader:value=>header=value};
+  element('#google-signin').click();
+  for(let i=0;i<200&&!window.PL_DB&&element('#google-signin').disabled;i++)await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(window.PL_DB?.connected,element('#connect-message-text').textContent);
+  return {window,writes,reads,inputTitle,setHeader:value=>header=value};
 }
 
+test('only Sale Price, PL Input and business_plans are read; manpower and legacy tabs never are',async()=>{
+  const {window,reads,inputTitle}=await connectFixture({withInput:true});
+  assert.deepEqual(reads,["'Sale Price'!A1:Q",`'${inputTitle}'!A1:AA`]);
+  assert.equal(window.PL_DATA.inputMissing,false);assert.equal(window.PL_DATA.scopes.length,1);
+});
+test('creating the input tab writes the template once and never over an existing tab',async()=>{
+  const {window,writes,inputTitle}=await connectFixture();
+  assert.equal(window.PL_DATA.inputMissing,true);assert.equal(writes.length,0);
+  await window.PL_DB.createInputSheet();
+  assert.equal(writes.length,2);assert.ok(writes[0].url.endsWith(':batchUpdate'));
+  assert.equal(writes[1].method,'PUT');assert.equal(writes[1].body.values[2][3],'Jan Actual');assert.ok(writes[1].url.includes(inputTitle));
+  await window.PL_DB.createInputSheet();assert.equal(writes.length,2);
+});
+test('a filled input tab is never overwritten',async()=>{
+  const {window,writes}=await connectFixture({withInput:true});
+  await window.PL_DB.createInputSheet();assert.equal(writes.length,0);
+});
 test('new workbook opens without business_plans; log creation and header writes occur only on Save',async()=>{
-  const {window,writes}=await connectFixture();assert.equal(writes.length,0);assert.equal(window.PL_DATA.year,2035);
+  const {window,writes}=await connectFixture();assert.equal(writes.length,0);assert.equal(window.PL_DATA.year,new Date().getFullYear());
   await window.PL_DB.savePlan('pd',{assumptions:{volume:0,price:1,raw:2,labor:3,fixed:4},initiatives:[]});
   assert.equal(writes.length,3);assert.ok(writes[0].url.endsWith(':batchUpdate'));assert.equal(writes[1].method,'PUT');assert.ok(writes[2].url.includes(':append'));
   assert.equal(writes[2].body.values[0][1],'pd');assert.equal(writes[2].body.values[0][4],0);

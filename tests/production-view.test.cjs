@@ -68,3 +68,17 @@ test('saving FX clears cached prices, updates totals, and persists for next visi
   assert.equal(run('dailySummary().estimatedValue'),1230);
   assert.equal(fixture(stored.get('pl-production-fx-v1-fixture')).run('dailySummary().estimatedValue'),1230);
 });
+test('monthly P&L revenue = production qty × FC price; unpriced models are counted but not valued',()=>{
+  const {context,run}=fixture();
+  const adapter=require('../site/workbook-data.js');
+  context.window.PL_WORKBOOK=adapter;
+  const scope=adapter.parseInputSheet(adapter.inputTemplate(2026),2026,new Date(2026,10,1));
+  scope.periods[9].result.rm=100;
+  run('D.scopes[0]=undefined');context.window.PL_DATA.scopes[0]=scope;
+  run('applyProductionRevenue()');
+  const oct=scope.periods[9];
+  assert.equal(oct.unitsResult,10);assert.equal(oct.unpricedQty,4);
+  assert.equal(oct.result.revenue,3*320+3*50);
+  assert.equal(oct.result.cm,3*320+3*50-100);
+  assert.equal(scope.periods[0].result.revenue,0);assert.equal(scope.periods[11].result.revenue,null);
+});
