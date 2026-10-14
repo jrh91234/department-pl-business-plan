@@ -46,18 +46,31 @@
   const FC_KEYS = ['ohfc','admin','center3','center7','impairment'];
   const inputSheetName = year => `PL Input ${year}`;
   const AUTO_REVENUE = 'อัตโนมัติ';
-  function inputTemplate(year) {
-    const header = ['key','รายการ','ชื่อใน BP บริษัท A',...MONTHS.map(m => `${m} Actual`),...MONTHS.map(m => `${m} BP`)];
-    const rows = DEFINITIONS.filter(([key]) => INPUT_KEYS.includes(key)).map(([key,label]) => [
-      key, label, SHEET_LABELS[key],
-      ...MONTHS.map(() => key === 'revenue' ? AUTO_REVENUE : ''),
+  function inputTemplate(year, {label = 'แผนก PD', auto = true} = {}) {
+    const header = ['key','รายการ (ชื่อที่แสดงบนเว็บ)','ชื่อรอง / ภาษาอังกฤษ',...MONTHS.map(m => `${m} Actual`),...MONTHS.map(m => `${m} BP`)];
+    const rows = DEFINITIONS.filter(([key]) => INPUT_KEYS.includes(key)).map(([key,thai,en]) => [
+      key, thai, SHEET_LABELS[key] || en,
+      ...MONTHS.map(() => key === 'revenue' && auto ? AUTO_REVENUE : ''),
       ...MONTHS.map(() => ''),
     ]);
+    const revenueNote = auto ? 'รายได้ Actual คำนวณจากยอดผลิต × ราคา FC ใน Sale Price (ใส่ตัวเลขทับเพื่อใช้ค่าที่กรอกเอง)' : 'รายได้ Actual ของแผนกนี้กรอกเอง (ไม่มียอดผลิตให้คำนวณ)';
     return [
-      [`P&L Input · แผนก PD · ปี ${year}`],
-      ['กรอกเป็นบาท ค่าใช้จ่ายใส่เป็นค่าบวก · รายได้ Actual คำนวณจากยอดผลิต × ราคา FC ใน Sale Price · ค่าแรงใส่เฉพาะยอดรวมต่อเดือน (รายละเอียดกำลังคนเก็บในแท็บอื่นที่เว็บไม่อ่าน) · ช่องว่างนับเป็น 0 ในยอดรวม'],
+      [`P&L Input · ${label} · ปี ${year}`],
+      [`กรอกเป็นบาท ค่าใช้จ่ายใส่เป็นค่าบวก · ${revenueNote} · แก้ชื่อในคอลัมน์ B และ C ได้ เว็บหาแถวจากคอลัมน์ key · ค่าแรงใส่เฉพาะยอดรวมต่อเดือน · ช่องว่างนับเป็น 0 ในยอดรวม`],
       header, ...rows,
     ];
+  }
+  // Every tab named "PL Input <year>" (PD) or "PL Input <year> <name>" is a department.
+  function departmentSheets(titles, year) {
+    const base = inputSheetName(year), out = [{id:'pd',name:'',label:'แผนก PD',sheet:base,auto:true}], seen = new Set(['pd']);
+    for (const title of titles) {
+      if (!title.startsWith(base + ' ')) continue;
+      const name = title.slice(base.length + 1).trim(), id = 'd:' + name.toLowerCase();
+      if (!name || /^pd$/i.test(name) || seen.has(id)) continue;
+      seen.add(id);
+      out.push({id,name,label:/^แผนก/.test(name) ? name : 'แผนก ' + name,sheet:title,auto:false});
+    }
+    return out;
   }
   function groupSum(values, keys) {
     const entered = keys.map(key => values[key]).filter(value => number(value) !== null);
@@ -72,24 +85,28 @@
     out.net = out.profit !== null ? out.profit + (out.other ?? 0) - (out.extra ?? 0) - (out.interest ?? 0) - (out.tax ?? 0) : null;
     return out;
   }
-  function parseInputSheet(rows, year, today = new Date()) {
-    const sheet = inputSheetName(year);
+  function parseInputSheet(rows, year, today = new Date(), dept = {id:'pd',name:'',label:'แผนก PD',sheet:inputSheetName(year),auto:true}) {
     const headerIndex = (rows || []).findIndex(row => row?.some(v => text(v) === 'Jan Actual'));
     const headers = headerIndex >= 0 ? rows[headerIndex].map(text) : [];
-    const rowByKey = {};
+    const rowByKey = {}, labels = {};
     if (headerIndex >= 0) rows.forEach((row, i) => {
       const key = text(row?.[0]);
-      if (i > headerIndex && INPUT_KEYS.includes(key) && !rowByKey[key]) rowByKey[key] = i + 1;
+      if (i > headerIndex && INPUT_KEYS.includes(key) && !rowByKey[key]) {
+        rowByKey[key] = i + 1;
+        const name = text(row[1]), second = text(row[2]);
+        if (name || second) labels[key] = {label:name,en:second};
+      }
     });
     const closedMonths = year < today.getFullYear() ? 12 : year > today.getFullYear() ? 0 : today.getMonth() + 1;
     const periods = MONTHS.map((month, m) => {
       const resultIndex = headers.indexOf(`${month} Actual`), bpIndex = headers.indexOf(`${month} BP`);
       const values = index => Object.fromEntries(INPUT_KEYS.map(key => [key, index >= 0 && rowByKey[key] ? number(rows[rowByKey[key]-1]?.[index]) : null]));
       const result = values(resultIndex);
-      result.revenue = null; // Filled from production × Sale Price once the barcode Log is read.
-      return {month,bpCol:bpIndex >= 0 ? columnName(bpIndex) : '',resultCol:resultIndex >= 0 ? columnName(resultIndex) : '',kind:m < closedMonths ? 'Actual' : 'Forecast',bp:computeTotals(values(bpIndex)),result:computeTotals(result),unitsBP:null,unitsResult:null};
+      // A number in the revenue cell is a manual figure. PD otherwise fills it from production × price.
+      const revenueManual = result.revenue;
+      return {month,bpCol:bpIndex >= 0 ? columnName(bpIndex) : '',resultCol:resultIndex >= 0 ? columnName(resultIndex) : '',kind:m < closedMonths ? 'Actual' : 'Forecast',revenueManual,bp:computeTotals(values(bpIndex)),result:computeTotals(result),unitsBP:null,unitsResult:null};
     });
-    return {id:'pd',label:'แผนก PD',sheet,year,rowByKey,periods,missing:headerIndex < 0};
+    return {id:dept.id,name:dept.name || '',label:dept.label,sheet:dept.sheet,auto:!!dept.auto,year,rowByKey,labels,periods,missing:headerIndex < 0};
   }
   function parseProducts(rows) {
     const keyOf = model => text(model).replace(/-S$/i,'').toUpperCase();
@@ -331,22 +348,24 @@
     const dates=records.map(record=>record.date).sort();
     return {status:'loaded',records,rowCount:rawRows,voidRows,ignoredRows,firstDate:dates[0]||'',lastDate:dates.at(-1)||'',loadedAt:new Date().toISOString()};
   }
-  function inputDataset(metadata, {year, inputRows = [], saleRows = [], today = new Date()} = {}) {
-    const scope = parseInputSheet(inputRows, year, today);
+  function inputDataset(metadata, {year, inputRows = {}, saleRows = [], today = new Date()} = {}) {
+    const titles = metadata.sheets.map(({properties:p}) => p.title), departments = departmentSheets(titles, year);
+    const rowsBySheet = Array.isArray(inputRows) ? {[departments[0].sheet]:inputRows} : inputRows;
+    const scopes = departments.map(dept => parseInputSheet(rowsBySheet[dept.sheet] || [], year, today, dept));
     const isError = v => typeof v === 'string' && /^#(REF!|DIV\/0!|VALUE!|N\/A|NAME\?|NUM!|ERROR!|NULL!)$/.test(v.trim());
     const errorsIn = (title, rows) => rows.flatMap((row, r) => (row || []).map((v, c) => isError(v) ? {sheet:title,cell:columnName(c)+(r+1),error:v.trim()} : null).filter(Boolean));
-    const errors = [...errorsIn('Sale Price', saleRows), ...errorsIn(scope.sheet, inputRows)];
-    const read = {'Sale Price':'A1:Q', [scope.sheet]:'A1:AA', business_plans:'A1:J'};
+    const errors = [...errorsIn('Sale Price', saleRows), ...departments.flatMap(d => errorsIn(d.sheet, rowsBySheet[d.sheet] || []))];
+    const read = {'Sale Price':'A1:Q', business_plans:'A1:J', ...Object.fromEntries(departments.map(d => [d.sheet,'A1:AA']))};
     return {
       source:metadata.properties.title,spreadsheetId:metadata.spreadsheetId,year,currency:'THB',schema:'pl-input',loadedAt:new Date().toISOString(),
-      rows:DEFINITIONS.map(([key,label,en,type],order)=>({key,label,en,type,order,row:scope.rowByKey[key]||null,input:INPUT_KEYS.includes(key),labor:LABOR_KEYS.includes(key)})),
-      scopes:[scope],inputSheet:scope.sheet,inputMissing:scope.missing,
+      rows:DEFINITIONS.map(([key,label,en,type],order)=>({key,label,en,type,order,row:scopes[0].rowByKey[key]||null,input:INPUT_KEYS.includes(key),labor:LABOR_KEYS.includes(key)})),
+      scopes,inputSheet:scopes[0].sheet,inputMissing:scopes[0].missing,
       products:parseProducts(saleRows),exchangeBP:number(saleRows[0]?.[6]),exchangeFC:number(saleRows[0]?.[14]),
       errors,
       sources:metadata.sheets.map(({properties:p})=>({name:p.title,sheetId:p.sheetId,dimension:`A1:${columnName(p.gridProperties.columnCount-1)}${p.gridProperties.rowCount}`,hidden:!!p.hidden,used:!!read[p.title],errors:read[p.title]?errors.filter(e=>e.sheet===p.title).length:null,checkedRange:read[p.title]||null})),
     };
   }
-  const api = {MONTHS,DEFINITIONS,INPUT_KEYS,LABOR_KEYS,AUTO_REVENUE,columnName,inputSheetName,inputTemplate,computeTotals,parseInputSheet,parseProducts,parseCsvRows,parseJobOrderCsv,parseBarcodeLog,inputDataset};
+  const api = {MONTHS,DEFINITIONS,INPUT_KEYS,LABOR_KEYS,AUTO_REVENUE,columnName,inputSheetName,departmentSheets,inputTemplate,computeTotals,parseInputSheet,parseProducts,parseCsvRows,parseJobOrderCsv,parseBarcodeLog,inputDataset};
   if (typeof window !== 'undefined') window.PL_WORKBOOK = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

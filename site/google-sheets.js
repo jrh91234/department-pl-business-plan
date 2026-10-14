@@ -230,39 +230,42 @@
     window.PL_SAVED_BY_SCOPE = savedByScope;
   }
 
-  // Only Sale Price, the PL Input tab and business_plans are read. Other tabs (manpower detail,
-  // legacy BP sheets) stay in Google Sheets and never reach the browser.
+  // Only Sale Price, the PL Input tabs (one per department) and business_plans are read.
+  // Other tabs (manpower detail, legacy BP sheets) stay in Google Sheets and never reach the browser.
   async function loadDataset(onProgress = () => {}, year = new Date().getFullYear()) {
     onProgress({percent:2,message:'กำลังอ่านโครงสร้าง Google Sheets…'});
     const metadata = await readMetadata();
     const titles = metadata.sheets.map(s => s.properties.title);
     if (!titles.includes('Sale Price')) throw new Error('ไม่พบแท็บ Sale Price ในชีต');
-    const inputSheet = window.PL_WORKBOOK.inputSheetName(year);
-    const ranges = [`${quoted('Sale Price')}!A1:Q`];
-    if (titles.includes(inputSheet)) ranges.push(`${quoted(inputSheet)}!A1:AA`);
+    const inputSheets = window.PL_WORKBOOK.departmentSheets(titles, year).map(d => d.sheet).filter(title => titles.includes(title));
+    const ranges = [`${quoted('Sale Price')}!A1:Q`, ...inputSheets.map(title => `${quoted(title)}!A1:AA`)];
     if (titles.includes('business_plans')) ranges.push(`${quoted('business_plans')}!A1:J`);
     onProgress({percent:15,message:'กำลังอ่าน Sale Price และ PL Input…'});
     const parts = await sheetBatchValues(ranges);
     const byTitle = Object.fromEntries(ranges.map((range, i) => [range.slice(1, range.lastIndexOf("'")).replaceAll("''", "'"), parts[i]]));
     onProgress({percent:78,message:'อ่านชีตแล้ว กำลังจัดรูปข้อมูล…'});
-    const dataset = window.PL_WORKBOOK.inputDataset(metadata, {year, saleRows:byTitle['Sale Price'] || [], inputRows:byTitle[inputSheet] || []});
+    const dataset = window.PL_WORKBOOK.inputDataset(metadata, {year, saleRows:byTitle['Sale Price'] || [], inputRows:Object.fromEntries(inputSheets.map(title => [title, byTitle[title] || []]))});
     savedPlans(byTitle.business_plans || [], year);
     onProgress({percent:94,message:'เตรียมข้อมูล P&L เสร็จแล้ว…'});
     return dataset;
   }
 
-  async function createInputSheet(year = window.PL_DATA.year) {
-    const title = window.PL_WORKBOOK.inputSheetName(year);
+  // Creates the input tab for a department ("PD" when name is empty) with the template.
+  // A tab that already holds anything is never overwritten.
+  async function createInputSheet(year = window.PL_DATA.year, name = '') {
+    name = String(name || '').trim();
+    if (name && (/[\[\]*?:\/\\]/.test(name) || /^pd$/i.test(name) || name.length > 60)) throw new Error('ชื่อแผนกต้องไม่ซ้ำกับ PD ไม่เกิน 60 ตัวอักษร และห้ามมี [ ] * ? : / \\');
+    const base = window.PL_WORKBOOK.inputSheetName(year), title = name ? `${base} ${name}` : base;
+    const label = name ? (/^แผนก/.test(name) ? name : `แผนก ${name}`) : 'แผนก PD';
     await readMetadata();
     if (dbMetadata.sheets.some(s => s.properties.title === title)) {
-      // Never write the template over a tab that holds anything: it may contain entered costs.
       const existing = await sheetValues(`${quoted(title)}!A1:AA40`);
       if (existing.some(row => row.some(v => v !== '' && v !== null))) return title;
     } else {
       await spreadsheetRequest(':batchUpdate', {method:'POST',body:JSON.stringify({requests:[{addSheet:{properties:{title,gridProperties:{rowCount:40,columnCount:27,frozenRowCount:3,frozenColumnCount:3}}}}]})});
     }
     const range = encodeURIComponent(`${quoted(title)}!A1`);
-    await spreadsheetRequest(`/values/${range}?valueInputOption=RAW`, {method:'PUT',body:JSON.stringify({values:window.PL_WORKBOOK.inputTemplate(year)})});
+    await spreadsheetRequest(`/values/${range}?valueInputOption=RAW`, {method:'PUT',body:JSON.stringify({values:window.PL_WORKBOOK.inputTemplate(year,{label,auto:!name})})});
     return title;
   }
 
@@ -373,7 +376,7 @@
       document.querySelector('#refresh-data').hidden = false;
       document.querySelector('#connection-status').innerHTML = '<i></i>Google Sheets เชื่อมต่อแล้ว';
       const app = document.createElement('script');
-      app.src = 'app.js?v=20261014c';
+      app.src = 'app.js?v=20261014d';
       app.onload = () => {
         setMessage('โหลดข้อมูลพร้อมแล้ว',false,100);
         setTimeout(()=>{gate.hidden=true;document.querySelector('#main').hidden=false;},220);

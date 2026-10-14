@@ -94,7 +94,7 @@ test('cost structure covers the months in the date range, from PL Input costs',(
   const {context,run}=fixture();
   assert.deepEqual([...run("state.dailyStart='2026-09-20';state.dailyEnd='2026-10-03';costMonthIndexes()")],[8,9]);
   assert.match(run('costPanel()'),/ยังไม่ได้กรอกต้นทุน/);assert.doesNotMatch(run('costPanel()'),/create-input/);
-  assert.match(run('D.inputMissing=true;costPanel()'),/data-action="create-input"/);run('D.inputMissing=false');
+  assert.match(run('D.scopes[0].missing=true;costPanel()'),/data-action="create-input" data-dept=""/);run('D.scopes[0].missing=false');
   const periods=context.window.PL_DATA.scopes[0].periods,W=require('../site/workbook-data.js');
   periods[8].result=W.computeTotals({revenue:1,rm:400000,labor:100000,ohfc:300000});
   periods[9].result=W.computeTotals({revenue:1,rm:100000,ohvc:100000});
@@ -104,4 +104,36 @@ test('cost structure covers the months in the date range, from PL Input costs',(
   periods[9].result=W.computeTotals({revenue:1});
   const partial=run('costPanel()');assert.match(partial,/วัตถุดิบ<strong>0\.40<\/strong>/);assert.match(partial,/ยังไม่ได้กรอกต้นทุนของ ตุลาคม/);
   assert.match(run('dailyDashboard()'),/cost-panel/);
+});
+
+function twoDepartments(){
+  const f=fixture(),W=require('../site/workbook-data.js');f.context.window.PL_WORKBOOK=W;
+  const rows=W.inputTemplate(2026,{label:'แผนก QA',auto:false}),h=rows[2];
+  rows.find(r=>r[0]==='revenue')[h.indexOf('Sep Actual')]=900000;rows.find(r=>r[0]==='rm')[h.indexOf('Sep Actual')]=300000;
+  rows.find(r=>r[0]==='rm')[1]='วัตถุดิบหลัก';rows.find(r=>r[0]==='rm')[2]='Main material';
+  const qa=W.parseInputSheet(rows,2026,new Date(2026,9,14),{id:'d:qa',name:'QA',label:'แผนก QA',sheet:'PL Input 2026 QA',auto:false});
+  f.context.window.PL_DATA.scopes.push(qa);
+  return {...f,qa};
+}
+test('a department without production data shows only its cost structure and keeps manual revenue',()=>{
+  const {run,context}=twoDepartments();
+  run("applyProductionRevenue();state.scope='d:qa';state.page='overview';state.dailyStart='2026-09-01';state.dailyEnd='2026-09-30'");
+  const html=run('dailyDashboard()');
+  assert.match(html,/เป็นของแผนก PD เท่านั้น/);assert.match(html,/cost-panel/);assert.doesNotMatch(html,/daily-kpi-grid/);
+  assert.match(html,/แผนก QA/);assert.match(html,/วัตถุดิบ<strong>0\.30<\/strong>/);
+  assert.equal(context.window.PL_DATA.scopes[1].periods[8].result.revenue,900000);
+  assert.equal(context.window.PL_DATA.scopes[1].periods[8].result.cm,600000);
+});
+test('production revenue goes only to PD; a number typed in the PD revenue cell wins',()=>{
+  const {run,context}=twoDepartments(),scopes=context.window.PL_DATA.scopes;
+  run('applyProductionRevenue()');
+  assert.equal(scopes[0].periods[9].result.revenue,3*320+3*50);assert.equal(scopes[1].periods[9].result.revenue,null);
+  scopes[0].periods[9].revenueManual=777;run('applyProductionRevenue()');
+  assert.equal(scopes[0].periods[9].result.revenue,777);
+});
+test('item names typed in columns B and C of the department tab replace the built-in names',()=>{
+  const {run}=twoDepartments();
+  run("state.scope='d:qa'");
+  assert.match(run('tableRows(true)'),/วัตถุดิบหลัก/);assert.match(run('tableRows(true)'),/Main material/);
+  run("state.scope='pd'");assert.doesNotMatch(run('tableRows(true)'),/วัตถุดิบหลัก/);assert.match(run('tableRows(true)'),/วัตถุดิบใช้ไป/);
 });
