@@ -17,7 +17,7 @@ function fixture(savedRate){
   ]}};
   const context=vm.createContext({window:{PL_DATA:data,PL_CONFIG:{spreadsheetId:'fixture'}},localStorage:{getItem:key=>stored.get(key)||null,setItem:(key,value)=>stored.set(key,value)},Intl,Date,console});
   vm.runInContext(prefix,context);
-  vm.runInContext("state.period='daily';state.dailyStart='2026-10-01';state.dailyEnd='2026-10-03';",context);
+  vm.runInContext("state.dailyStart='2026-10-01';state.dailyEnd='2026-10-03';",context);
   return {context,stored,run:code=>vm.runInContext(code,context)};
 }
 test('Sale total uses matched production quantity and preserves THB-only prices under FX override',()=>{
@@ -82,13 +82,35 @@ test('monthly P&L revenue = production qty × FC price; unpriced models are coun
   assert.equal(oct.result.cm,3*320+3*50-100);
   assert.equal(scope.periods[0].result.revenue,0);assert.equal(scope.periods[11].result.revenue,null);
 });
-test('overview is the date-range production page and has no period selector or daily toggle',()=>{
+test('one merged page: production section then P&L section, driven by the same date range',()=>{
   const {run}=fixture();
   run("state.page='overview'");
   assert.deepEqual([...run('activeRange()')],['2026-10-01','2026-10-03']);
   assert.equal(run('productionView()'),true);assert.equal(run('chartMode()'),'daily');
-  assert.equal(run('overview()'),run('dailyDashboard()'));
-  run("state.page='pnl'");assert.equal(run('productionView()'),false);
+  const html=run('overview()');
+  assert.ok(html.startsWith(run('dailyDashboard()')));
+  assert.match(html,/Profit &amp; Loss/);assert.match(html,/data-action="export-pl"/);assert.match(html,/pnl-table/);
+  assert.deepEqual([...run('selectedIndexes()')],[9]);
+});
+test('sale is tied together: the P&L revenue of whole months equals the estimated production value',()=>{
+  const {run,context}=fixture();context.window.PL_WORKBOOK=require('../site/workbook-data.js');
+  run("state.page='overview';state.dailyStart='2026-10-01';state.dailyEnd='2026-10-31';applyProductionRevenue()");
+  const estimated=run('dailySummary().estimatedValue'),pl=run('D.scopes[0].periods[9].result.revenue');
+  assert.equal(estimated,960+150);assert.equal(pl,estimated);
+  assert.doesNotMatch(run('plSection()'),/ใช้ทั้งเดือน/);
+  // editing the exchange rate reprices both
+  run("fxOverride=64;resetPrices()");
+  assert.equal(run('dailySummary().estimatedValue'),run('D.scopes[0].periods[9].result.revenue'));
+  assert.equal(run('D.scopes[0].periods[9].result.revenue')>estimated,true);
+  // a partial month says so
+  run("fxOverride=null;resetPrices();state.dailyStart='2026-10-05'");
+  assert.match(run('plSection()'),/ใช้ทั้งเดือนของ ตุลาคม 2026/);
+});
+test('the merged page covers every month the range touches',()=>{
+  const {run}=fixture();run("state.page='overview'");
+  assert.deepEqual([...run("state.dailyStart='2026-09-20';state.dailyEnd='2026-10-03';selectedIndexes()")],[8,9]);
+  assert.equal(run('rangeCoversWholeMonths()'),false);
+  assert.equal(run("state.dailyStart='2026-09-01';state.dailyEnd='2026-10-31';rangeCoversWholeMonths()"),true);
 });
 test('cost structure covers the months in the date range, from PL Input costs',()=>{
   const {context,run}=fixture();
