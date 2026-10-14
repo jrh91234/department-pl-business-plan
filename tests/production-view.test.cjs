@@ -137,3 +137,15 @@ test('item names typed in columns B and C of the department tab replace the buil
   assert.match(run('tableRows(true)'),/วัตถุดิบหลัก/);assert.match(run('tableRows(true)'),/Main material/);
   run("state.scope='pd'");assert.doesNotMatch(run('tableRows(true)'),/วัตถุดิบหลัก/);assert.match(run('tableRows(true)'),/วัตถุดิบใช้ไป/);
 });
+test('chart is drawn at the card width, so the sale axis stays inside the frame however long the range',()=>{
+  const {run}=fixture();
+  for(const [from,to] of [['2026-10-01','2026-10-03'],['2026-01-01','2026-12-31']]){
+    run(`state.dailyStart='${from}';state.dailyEnd='${to}'`);
+    const chart=run("dailyProductionChart(dailyRecords(),'daily',500,260)");
+    assert.match(chart,/viewBox="0 0 500 260"/);assert.doesNotMatch(chart,/width:\d+px/);
+    const xs=[...chart.matchAll(/<text x="([\d.]+)"[^>]*class="sale-axis"/g)].map(m=>Number(m[1]));
+    assert.ok(xs.length>0&&xs.every(x=>x===423),xs.join());
+    const ticks=(chart.match(/text-anchor="middle"/g)||[]).length;assert.ok(ticks<=Math.ceil(500/62)+1,`ticks ${ticks}`);
+  }
+  const tall=run("dailyProductionChart(dailyRecords(),'daily',500,520)");assert.match(tall,/viewBox="0 0 500 520"/);assert.doesNotMatch(tall,/NaN|Infinity/);
+});

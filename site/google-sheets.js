@@ -378,7 +378,7 @@
       document.querySelector('#refresh-data').hidden = false;
       document.querySelector('#connection-status').innerHTML = '<i></i>Google Sheets เชื่อมต่อแล้ว';
       const app = document.createElement('script');
-      app.src = 'app.js?v=20261014d';
+      app.src = 'app.js?v=20261014f';
       app.onload = () => {
         setMessage('โหลดข้อมูลพร้อมแล้ว',false,100);
         setTimeout(()=>{gate.hidden=true;document.querySelector('#main').hidden=false;},220);
