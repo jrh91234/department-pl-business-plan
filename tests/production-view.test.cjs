@@ -119,12 +119,12 @@ test('a department without production data shows only its cost structure and kee
   const {run,context}=twoDepartments();
   run("applyProductionRevenue();state.scope='d:qa';state.page='overview';state.dailyStart='2026-09-01';state.dailyEnd='2026-09-30'");
   const html=run('dailyDashboard()');
-  assert.match(html,/เป็นของแผนก PD เท่านั้น/);assert.match(html,/cost-panel/);assert.doesNotMatch(html,/daily-kpi-grid/);
+  assert.match(html,/เป็นของแผนก H9 เท่านั้น/);assert.match(html,/cost-panel/);assert.doesNotMatch(html,/daily-kpi-grid/);
   assert.match(html,/แผนก QA/);assert.match(html,/วัตถุดิบ<strong>0\.30<\/strong>/);
   assert.equal(context.window.PL_DATA.scopes[1].periods[8].result.revenue,900000);
   assert.equal(context.window.PL_DATA.scopes[1].periods[8].result.cm,600000);
 });
-test('production revenue goes only to PD; a number typed in the PD revenue cell wins',()=>{
+test('production revenue goes only to the base department (H9); a number typed in its revenue cell wins',()=>{
   const {run,context}=twoDepartments(),scopes=context.window.PL_DATA.scopes;
   run('applyProductionRevenue()');
   assert.equal(scopes[0].periods[9].result.revenue,3*320+3*50);assert.equal(scopes[1].periods[9].result.revenue,null);
@@ -153,11 +153,11 @@ test('freshly read sheet data is merged in place: new department appears and is 
   const {run,context}=fixture(),W=require('../site/workbook-data.js');context.window.PL_WORKBOOK=W;
   const sheet=(title,i)=>({properties:{title,sheetId:i,gridProperties:{rowCount:5,columnCount:27}}});
   const sale=[[],[],[],[],[]];sale[0][14]=32;sale[4][10]='MODEL-A';sale[4][12]=10;sale[4][14]=320;
-  context.fresh=W.inputDataset({properties:{title:'DB'},spreadsheetId:'x',sheets:[sheet('Sale Price',1),sheet('PL Input 2026',2),sheet('PL Input 2026 H9',3)]},{year:2026,saleRows:sale,inputRows:{'PL Input 2026 H9':W.inputTemplate(2026,{label:'แผนก H9',auto:false})}});
-  run("mergeDataset(fresh,'d:h9')");
-  assert.deepEqual(run('D.scopes.map(s=>s.id)'),['pd','d:h9']);
-  assert.equal(run('state.scope'),'d:h9');assert.equal(run('D.jobOrder.status'),'loaded');assert.equal(run('D.jobOrder.records.length'),4);
+  context.fresh=W.inputDataset({properties:{title:'DB'},spreadsheetId:'x',sheets:[sheet('Sale Price',1),sheet('PL Input 2026',2),sheet('PL Input 2026 QA',3)]},{year:2026,saleRows:sale,inputRows:{'PL Input 2026 QA':W.inputTemplate(2026,{label:'แผนก QA',auto:false})}});
+  run("mergeDataset(fresh,'d:qa')");
+  assert.deepEqual(run('D.scopes.map(s=>s.id)'),['pd','d:qa']);
+  assert.equal(run('state.scope'),'d:qa');assert.equal(run('D.jobOrder.status'),'loaded');assert.equal(run('D.jobOrder.records.length'),4);
   assert.equal(run('D.scopes[0].periods[9].result.revenue'),960);
-  run("mergeDataset(fresh,'d:missing')");assert.equal(run('state.scope'),'d:h9');
+  run("mergeDataset(fresh,'d:missing')");assert.equal(run('state.scope'),'d:qa');
   run("state.scope='pd';mergeDataset(fresh)");assert.equal(run('state.scope'),'pd');
 });

@@ -35,7 +35,7 @@ test('input sheet: Actual revenue waits for production, costs and BP come from t
   assert.deepEqual(scope.periods.map(p=>p.kind).slice(0,3),['Actual','Actual','Forecast']);
   assert.equal(scope.missing,false);
 });
-test('missing input tab yields an empty PD scope flagged for creation',()=>{
+test('missing input tab yields an empty H9 scope flagged for creation',()=>{
   const ds = inputDataset({properties:{title:'DB'},spreadsheetId:'x',sheets:[{properties:{title:'Sale Price',sheetId:1,gridProperties:{rowCount:5,columnCount:17}}},{properties:{title:'Manpower',sheetId:2,gridProperties:{rowCount:5,columnCount:5}}}]},{year:2026,saleRows:[[,,,,,,'#REF!']]});
   assert.equal(ds.inputMissing,true);assert.equal(ds.scopes.length,1);assert.equal(ds.scopes[0].id,'pd');
   assert.equal(ds.sources.find(s=>s.name==='Manpower').used,false);
@@ -58,14 +58,14 @@ test('duplicate BP rows are retained and ambiguous forecast SKU rows are never m
   Object.assign(rows[6],{10:'SKU-A',12:21});products=parseProducts(rows);assert.equal(products.length,4);assert.equal(products[0].fcPriceUSD,null);assert.ok(products[0].matchWarning);
 });
 
-test('every PL Input <year> <name> tab is a department; PD is always first and never duplicated',()=>{
-  const d=departmentSheets(['Sale Price','PL Input 2026','PL Input 2026 QA','PL Input 2026 แผนก ขาย','PL Input 2026 pd','PL Input 2025 QA','PL Input 2026 ','PL Input 20260'],2026);
+test('every PL Input <year> <name> tab is a department; H9 is always first and never duplicated',()=>{
+  const d=departmentSheets(['Sale Price','PL Input 2026','PL Input 2026 QA','PL Input 2026 แผนก ขาย','PL Input 2026 h9','PL Input 2025 QA','PL Input 2026 ','PL Input 20260'],2026);
   assert.deepEqual(d.map(x=>x.id),['pd','d:qa','d:แผนก ขาย']);
-  assert.deepEqual(d.map(x=>x.label),['แผนก PD','แผนก QA','แผนก ขาย']);
+  assert.deepEqual(d.map(x=>x.label),['แผนก H9','แผนก QA','แผนก ขาย']);
   assert.deepEqual(d.map(x=>x.auto),[true,false,false]);assert.deepEqual(d.map(x=>x.name),['','QA','แผนก ขาย']);
   assert.equal(departmentSheets([],2026).length,1);
 });
-test('department template: manual revenue and editable names; PD template keeps the automatic marker',()=>{
+test('department template: manual revenue and editable names; the H9 template keeps the automatic marker',()=>{
   const manual=inputTemplate(2026,{label:'แผนก QA',auto:false}),auto=inputTemplate(2026);
   assert.match(manual[0][0],/แผนก QA/);assert.equal(manual[3][3],'');assert.equal(auto[3][3],'อัตโนมัติ');
   assert.equal(manual[2][1],'รายการ (ชื่อที่แสดงบนเว็บ)');
