@@ -4,7 +4,7 @@ const vm=require('node:vm');
 const fs=require('node:fs');
 const adapter=require('../site/workbook-data.js');
 
-async function connectFixture({withInput=false,extra=[]}={}) {
+async function connectFixture({withInput=false,extra=[],session=new Map(),click=true,badToken=false,expiresIn,expectConnected=false}={}) {
   const elements=new Map(),writes=[],reads=[];
   const element=id=>{if(!elements.has(id))elements.set(id,{hidden:false,disabled:true,style:{},classList:{toggle(){}},setAttribute(){},addEventListener(name,fn){this[name]=fn;}});return elements.get(id);};
   const year=new Date().getFullYear(),inputTitle=`PL Input ${year}`;
@@ -17,6 +17,7 @@ async function connectFixture({withInput=false,extra=[]}={}) {
   const response=(body,ok=true)=>({ok,status:ok?200:400,json:async()=>body});
   const fetch=async(url,opts={})=>{
     const uri=new URL(url), method=opts.method||'GET';
+    if(badToken)return {ok:false,status:401,json:async()=>({error:{message:'Invalid Credentials'}})};
     if(method!=='GET')writes.push({url:decodeURIComponent(url),method,body:JSON.parse(opts.body)});
     if(uri.pathname.endsWith(':batchUpdate')){const title=JSON.parse(opts.body).requests[0].addSheet.properties.title;metadata.sheets.push(sheet(title,metadata.sheets.length+10));return response({replies:[{}]});}
     if(uri.pathname.endsWith('values:batchGet')){const ranges=uri.searchParams.getAll('ranges');reads.push(...ranges);return response({valueRanges:ranges.map(r=>({values:r.startsWith("'Sale Price'")?sale:r.startsWith("'business_plans'")?(header.length?[header]:[]):inputRows}))});}
@@ -25,16 +26,17 @@ async function connectFixture({withInput=false,extra=[]}={}) {
   };
   class View {setFileIds(){return this;}setMimeTypes(){return this;}setIncludeFolders(){return this;}setSelectFolderEnabled(){return this;}setMode(){return this;}}
   class Picker {addView(){return this;}setMaxItems(){return this;}setLocale(){return this;}setDeveloperKey(){return this;}setAppId(){return this;}setOAuthToken(){return this;}setCallback(cb){this.callback=cb;return this;}build(){return {setVisible:()=>this.callback({action:'picked',docs:[{id:this.id||'fixture-id'}]})};}}
-  const stored=new Map(),prompts=[];
-  const window={PL_CONFIG:{googleClientId:'fixture',googleApiKey:'fixture',googleProjectNumber:'fixture',spreadsheetId:'fixture-id',jobOrderSpreadsheetId:'fixture-id',jobOrderSheetName:'Log'},PL_WORKBOOK:adapter,gapi:{load:(name,opts)=>opts.callback()},google:{accounts:{oauth2:{initTokenClient:opts=>({requestAccessToken:req=>{prompts.push(req.prompt);opts.callback({access_token:'fixture-token'});}})}},picker:{DocsView:View,PickerBuilder:Picker,ViewId:{SPREADSHEETS:'sheets'},DocsViewMode:{LIST:'list'},Action:{PICKED:'picked',CANCEL:'cancel'}}}};
+  const stored=session.local||(session.local=new Map()),prompts=[];
+  const tabStorage={getItem:k=>session.has(k)?session.get(k):null,setItem:(k,v)=>session.set(k,String(v)),removeItem:k=>session.delete(k)};
+  const window={PL_CONFIG:{googleClientId:'fixture',googleApiKey:'fixture',googleProjectNumber:'fixture',spreadsheetId:'fixture-id',jobOrderSpreadsheetId:'fixture-id',jobOrderSheetName:'Log'},PL_WORKBOOK:adapter,gapi:{load:(name,opts)=>opts.callback()},google:{accounts:{oauth2:{initTokenClient:opts=>({requestAccessToken:req=>{prompts.push(req.prompt);opts.callback({access_token:'fixture-token',expires_in:expiresIn});}})}},picker:{DocsView:View,PickerBuilder:Picker,ViewId:{SPREADSHEETS:'sheets'},DocsViewMode:{LIST:'list'},Action:{PICKED:'picked',CANCEL:'cancel'}}}};
   const document={querySelector:element,createElement:()=>({}),head:{appendChild:s=>s.onload()},body:{appendChild(){}}};
   const localStorage={getItem:k=>stored.get(k)??null,setItem:(k,v)=>stored.set(k,String(v)),removeItem:k=>stored.delete(k)};
-  vm.runInNewContext(fs.readFileSync(require.resolve('../site/google-sheets.js'),'utf8'),{window,document,fetch,localStorage,setTimeout,URL,URLSearchParams,Intl,crypto:require('node:crypto').webcrypto,location:{reload(){}}});
+  vm.runInNewContext(fs.readFileSync(require.resolve('../site/google-sheets.js'),'utf8'),{window,document,fetch,localStorage,sessionStorage:tabStorage,setTimeout,URL,URLSearchParams,Intl,crypto:require('node:crypto').webcrypto,location:{reload(){}}});
   await new Promise(resolve=>setImmediate(resolve));
-  element('#google-signin').click();
+  if(click)element('#google-signin').click();
   for(let i=0;i<200&&!window.PL_DB&&element('#google-signin').disabled;i++)await new Promise(resolve=>setImmediate(resolve));
-  assert.ok(window.PL_DB?.connected,element('#connect-message-text').textContent);
-  return {window,writes,reads,prompts,inputTitle,setHeader:value=>header=value,reconnect:async()=>{element('#google-signin').click();for(let i=0;i<50;i++)await new Promise(resolve=>setImmediate(resolve));}};
+  if(click||expectConnected)assert.ok(window.PL_DB?.connected,element('#connect-message-text').textContent);
+  return {window,writes,reads,prompts,element,session,inputTitle,setHeader:value=>header=value,reconnect:async()=>{element('#google-signin').click();for(let i=0;i<50;i++)await new Promise(resolve=>setImmediate(resolve));}};
 }
 
 test('only Sale Price, PL Input and business_plans are read; manpower and legacy tabs never are',async()=>{
@@ -69,6 +71,21 @@ test('first sign-in shows the account chooser; later visits let Google decide in
   assert.deepEqual(prompts,['select_account']);
   await reconnect();
   assert.deepEqual(prompts,['select_account','']);assert.ok(!prompts.includes('none'));
+});
+test('refreshing inside the token lifetime reopens the data with no Google popup',async()=>{
+  const first=await connectFixture({withInput:true});
+  assert.ok(first.session.has('pl-google-token-v1'));
+  const second=await connectFixture({withInput:true,session:first.session,click:false,expectConnected:true});
+  assert.ok(second.window.PL_DB?.connected);assert.deepEqual(second.prompts,[]);
+});
+test('an expired or refused saved token is dropped and the button is offered again',async()=>{
+  const first=await connectFixture({withInput:true,expiresIn:60});
+  const expired=await connectFixture({withInput:true,session:first.session,click:false});
+  assert.ok(!expired.window.PL_DB);assert.deepEqual(expired.prompts,[]);
+  const fresh=await connectFixture({withInput:true});
+  const refused=await connectFixture({withInput:true,session:fresh.session,click:false,badToken:true});
+  assert.ok(!refused.window.PL_DB?.connected);assert.ok(!refused.session.has('pl-google-token-v1'));
+  assert.equal(refused.element('#google-signin').disabled,false);assert.match(refused.element('#connect-message-text').textContent,/เซสชันเดิมหมดอายุ/);
 });
 test('a filled input tab is never overwritten',async()=>{
   const {window,writes}=await connectFixture({withInput:true});
