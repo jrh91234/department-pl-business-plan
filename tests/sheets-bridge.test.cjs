@@ -54,7 +54,7 @@ test('creating the input tab writes the template once and never over an existing
 });
 test('adding a department creates its own tab with a manual-revenue template; bad names are rejected',async()=>{
   const {window,writes,inputTitle}=await connectFixture({withInput:true});
-  await assert.rejects(window.PL_DB.createInputSheet(window.PL_DATA.year,'PD'),/ไม่ซ้ำกับ PD/);
+  await assert.rejects(window.PL_DB.createInputSheet(window.PL_DATA.year,'h9'),/ไม่ซ้ำกับ H9/);
   await assert.rejects(window.PL_DB.createInputSheet(window.PL_DATA.year,'a/b'),/ห้ามมี/);
   assert.equal(writes.length,0);
   const title=await window.PL_DB.createInputSheet(window.PL_DATA.year,'QA');

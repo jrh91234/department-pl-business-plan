@@ -32,7 +32,7 @@
     for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) result = String.fromCharCode(65 + (n - 1) % 26) + result;
     return result;
   }
-  // Line items the PD department fills by hand, in the order of the "BP บริษัท A" template.
+  // Line items the department fills by hand, in the order of the "BP บริษัท A" template.
   // Subtotals (VC, CM, FC, Profit, Net) are always computed so the sheet cannot drift from the web.
   const SHEET_LABELS = {
     revenue:'REVENUES', rm:'Raw material consumed', labor:'Direct labour', ot:'Overtime direct',
@@ -44,9 +44,11 @@
   const LABOR_KEYS = ['labor','ot','sc','scot'];
   const VC_KEYS = ['rm','labor','ot','sc','scot','ohvc','selling'];
   const FC_KEYS = ['ohfc','admin','center3','center7','impairment'];
+  // The base tab "PL Input <year>" belongs to the department that owns the barcode production data.
+  const BASE_NAME = 'H9', BASE_LABEL = 'แผนก H9';
   const inputSheetName = year => `PL Input ${year}`;
   const AUTO_REVENUE = 'อัตโนมัติ';
-  function inputTemplate(year, {label = 'แผนก PD', auto = true} = {}) {
+  function inputTemplate(year, {label = BASE_LABEL, auto = true} = {}) {
     const header = ['key','รายการ (ชื่อที่แสดงบนเว็บ)','ชื่อรอง / ภาษาอังกฤษ',...MONTHS.map(m => `${m} Actual`),...MONTHS.map(m => `${m} BP`)];
     const rows = DEFINITIONS.filter(([key]) => INPUT_KEYS.includes(key)).map(([key,thai,en]) => [
       key, thai, SHEET_LABELS[key] || en,
@@ -60,13 +62,13 @@
       header, ...rows,
     ];
   }
-  // Every tab named "PL Input <year>" (PD) or "PL Input <year> <name>" is a department.
+  // Every tab named "PL Input <year>" (H9) or "PL Input <year> <name>" is a department.
   function departmentSheets(titles, year) {
-    const base = inputSheetName(year), out = [{id:'pd',name:'',label:'แผนก PD',sheet:base,auto:true}], seen = new Set(['pd']);
+    const base = inputSheetName(year), out = [{id:'pd',name:'',label:BASE_LABEL,sheet:base,auto:true}], seen = new Set(['pd']);
     for (const title of titles) {
       if (!title.startsWith(base + ' ')) continue;
       const name = title.slice(base.length + 1).trim(), id = 'd:' + name.toLowerCase();
-      if (!name || /^pd$/i.test(name) || seen.has(id)) continue;
+      if (!name || name.toLowerCase() === BASE_NAME.toLowerCase() || seen.has(id)) continue;
       seen.add(id);
       out.push({id,name,label:/^แผนก/.test(name) ? name : 'แผนก ' + name,sheet:title,auto:false});
     }
@@ -85,7 +87,7 @@
     out.net = out.profit !== null ? out.profit + (out.other ?? 0) - (out.extra ?? 0) - (out.interest ?? 0) - (out.tax ?? 0) : null;
     return out;
   }
-  function parseInputSheet(rows, year, today = new Date(), dept = {id:'pd',name:'',label:'แผนก PD',sheet:inputSheetName(year),auto:true}) {
+  function parseInputSheet(rows, year, today = new Date(), dept = {id:'pd',name:'',label:BASE_LABEL,sheet:inputSheetName(year),auto:true}) {
     const headerIndex = (rows || []).findIndex(row => row?.some(v => text(v) === 'Jan Actual'));
     const headers = headerIndex >= 0 ? rows[headerIndex].map(text) : [];
     const rowByKey = {}, labels = {};
@@ -102,7 +104,7 @@
       const resultIndex = headers.indexOf(`${month} Actual`), bpIndex = headers.indexOf(`${month} BP`);
       const values = index => Object.fromEntries(INPUT_KEYS.map(key => [key, index >= 0 && rowByKey[key] ? number(rows[rowByKey[key]-1]?.[index]) : null]));
       const result = values(resultIndex);
-      // A number in the revenue cell is a manual figure. PD otherwise fills it from production × price.
+      // A number in the revenue cell is a manual figure. the base department otherwise fills it from production × price.
       const revenueManual = result.revenue;
       return {month,bpCol:bpIndex >= 0 ? columnName(bpIndex) : '',resultCol:resultIndex >= 0 ? columnName(resultIndex) : '',kind:m < closedMonths ? 'Actual' : 'Forecast',revenueManual,bp:computeTotals(values(bpIndex)),result:computeTotals(result),unitsBP:null,unitsResult:null};
     });
@@ -365,7 +367,7 @@
       sources:metadata.sheets.map(({properties:p})=>({name:p.title,sheetId:p.sheetId,dimension:`A1:${columnName(p.gridProperties.columnCount-1)}${p.gridProperties.rowCount}`,hidden:!!p.hidden,used:!!read[p.title],errors:read[p.title]?errors.filter(e=>e.sheet===p.title).length:null,checkedRange:read[p.title]||null})),
     };
   }
-  const api = {MONTHS,DEFINITIONS,INPUT_KEYS,LABOR_KEYS,AUTO_REVENUE,columnName,inputSheetName,departmentSheets,inputTemplate,computeTotals,parseInputSheet,parseProducts,parseCsvRows,parseJobOrderCsv,parseBarcodeLog,inputDataset};
+  const api = {MONTHS,DEFINITIONS,BASE_NAME,BASE_LABEL,INPUT_KEYS,LABOR_KEYS,AUTO_REVENUE,columnName,inputSheetName,departmentSheets,inputTemplate,computeTotals,parseInputSheet,parseProducts,parseCsvRows,parseJobOrderCsv,parseBarcodeLog,inputDataset};
   if (typeof window !== 'undefined') window.PL_WORKBOOK = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

@@ -270,13 +270,13 @@
     return dataset;
   }
 
-  // Creates the input tab for a department ("PD" when name is empty) with the template.
+  // Creates the input tab for a department (the base H9 tab when name is empty) with the template.
   // A tab that already holds anything is never overwritten.
   async function createInputSheet(year = window.PL_DATA.year, name = '') {
     name = String(name || '').trim();
-    if (name && (/[\[\]*?:\/\\]/.test(name) || /^pd$/i.test(name) || name.length > 60)) throw new Error('ชื่อแผนกต้องไม่ซ้ำกับ PD ไม่เกิน 60 ตัวอักษร และห้ามมี [ ] * ? : / \\');
+    if (name && (/[\[\]*?:\/\\]/.test(name) || name.toLowerCase() === window.PL_WORKBOOK.BASE_NAME.toLowerCase() || name.length > 60)) throw new Error('ชื่อแผนกต้องไม่ซ้ำกับ H9 ไม่เกิน 60 ตัวอักษร และห้ามมี [ ] * ? : / \\');
     const base = window.PL_WORKBOOK.inputSheetName(year), title = name ? `${base} ${name}` : base;
-    const label = name ? (/^แผนก/.test(name) ? name : `แผนก ${name}`) : 'แผนก PD';
+    const label = name ? (/^แผนก/.test(name) ? name : `แผนก ${name}`) : window.PL_WORKBOOK.BASE_LABEL;
     await readMetadata();
     if (dbMetadata.sheets.some(s => s.properties.title === title)) {
       const existing = await sheetValues(`${quoted(title)}!A1:AA40`);
@@ -406,7 +406,7 @@
       document.querySelector('#refresh-data').hidden = false;
       document.querySelector('#connection-status').innerHTML = '<i></i>Google Sheets เชื่อมต่อแล้ว';
       const app = document.createElement('script');
-      app.src = 'app.js?v=20261014h';
+      app.src = 'app.js?v=20261014i';
       app.onload = () => {
         setMessage('โหลดข้อมูลพร้อมแล้ว',false,100);
         setTimeout(()=>{gate.hidden=true;document.querySelector('#main').hidden=false;},220);
