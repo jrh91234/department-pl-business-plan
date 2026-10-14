@@ -25,8 +25,8 @@ async function connectFixture({withInput=false,extra=[]}={}) {
   };
   class View {setFileIds(){return this;}setMimeTypes(){return this;}setIncludeFolders(){return this;}setSelectFolderEnabled(){return this;}setMode(){return this;}}
   class Picker {addView(){return this;}setMaxItems(){return this;}setLocale(){return this;}setDeveloperKey(){return this;}setAppId(){return this;}setOAuthToken(){return this;}setCallback(cb){this.callback=cb;return this;}build(){return {setVisible:()=>this.callback({action:'picked',docs:[{id:this.id||'fixture-id'}]})};}}
-  const stored=new Map();
-  const window={PL_CONFIG:{googleClientId:'fixture',googleApiKey:'fixture',googleProjectNumber:'fixture',spreadsheetId:'fixture-id',jobOrderSpreadsheetId:'fixture-id',jobOrderSheetName:'Log'},PL_WORKBOOK:adapter,gapi:{load:(name,opts)=>opts.callback()},google:{accounts:{oauth2:{initTokenClient:opts=>({requestAccessToken:()=>opts.callback({access_token:'fixture-token'})})}},picker:{DocsView:View,PickerBuilder:Picker,ViewId:{SPREADSHEETS:'sheets'},DocsViewMode:{LIST:'list'},Action:{PICKED:'picked',CANCEL:'cancel'}}}};
+  const stored=new Map(),prompts=[];
+  const window={PL_CONFIG:{googleClientId:'fixture',googleApiKey:'fixture',googleProjectNumber:'fixture',spreadsheetId:'fixture-id',jobOrderSpreadsheetId:'fixture-id',jobOrderSheetName:'Log'},PL_WORKBOOK:adapter,gapi:{load:(name,opts)=>opts.callback()},google:{accounts:{oauth2:{initTokenClient:opts=>({requestAccessToken:req=>{prompts.push(req.prompt);opts.callback({access_token:'fixture-token'});}})}},picker:{DocsView:View,PickerBuilder:Picker,ViewId:{SPREADSHEETS:'sheets'},DocsViewMode:{LIST:'list'},Action:{PICKED:'picked',CANCEL:'cancel'}}}};
   const document={querySelector:element,createElement:()=>({}),head:{appendChild:s=>s.onload()},body:{appendChild(){}}};
   const localStorage={getItem:k=>stored.get(k)??null,setItem:(k,v)=>stored.set(k,String(v)),removeItem:k=>stored.delete(k)};
   vm.runInNewContext(fs.readFileSync(require.resolve('../site/google-sheets.js'),'utf8'),{window,document,fetch,localStorage,setTimeout,URL,URLSearchParams,Intl,crypto:require('node:crypto').webcrypto,location:{reload(){}}});
@@ -34,7 +34,7 @@ async function connectFixture({withInput=false,extra=[]}={}) {
   element('#google-signin').click();
   for(let i=0;i<200&&!window.PL_DB&&element('#google-signin').disabled;i++)await new Promise(resolve=>setImmediate(resolve));
   assert.ok(window.PL_DB?.connected,element('#connect-message-text').textContent);
-  return {window,writes,reads,inputTitle,setHeader:value=>header=value};
+  return {window,writes,reads,prompts,inputTitle,setHeader:value=>header=value,reconnect:async()=>{element('#google-signin').click();for(let i=0;i<50;i++)await new Promise(resolve=>setImmediate(resolve));}};
 }
 
 test('only Sale Price, PL Input and business_plans are read; manpower and legacy tabs never are',async()=>{
@@ -63,6 +63,12 @@ test('adding a department creates its own tab with a manual-revenue template; ba
 test('every department tab is read in the same single batch request',async()=>{
   const {reads}=await connectFixture({withInput:true,extra:['QA']});
   assert.equal(reads.length,3);assert.ok(reads.some(r=>r.includes('QA')));
+});
+test('first sign-in shows the account chooser; later visits let Google decide instead of the UI-less silent mode',async()=>{
+  const {prompts,reconnect}=await connectFixture({withInput:true});
+  assert.deepEqual(prompts,['select_account']);
+  await reconnect();
+  assert.deepEqual(prompts,['select_account','']);assert.ok(!prompts.includes('none'));
 });
 test('a filled input tab is never overwritten',async()=>{
   const {window,writes}=await connectFixture({withInput:true});

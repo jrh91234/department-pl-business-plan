@@ -351,7 +351,9 @@
     signIn.disabled = true;
     setMessage(reuseAuthorization ? 'กำลังเชื่อมต่อ Google ด้วยสิทธิ์เดิม…' : 'กำลังเข้าสู่ระบบและอ่านข้อมูลจากชีต…');
     try {
-      await requestAccessToken(reuseAuthorization ? 'none' : 'select_account');
+      // '' lets Google decide: no UI when the session and consent are still valid, the account chooser
+      // otherwise. 'none' can never show UI, so it failed whenever the session needed a click.
+      await requestAccessToken(reuseAuthorization ? '' : 'select_account');
       tokenReceived = true;
       if (readLocal(rememberedFileKey) !== config.spreadsheetId) {
         setMessage('เลือกฐานข้อมูล Department P&L Database ใน Google Drive…');
