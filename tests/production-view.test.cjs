@@ -115,8 +115,8 @@ test('the merged page covers every month the range touches',()=>{
 test('cost structure covers the months in the date range, from PL Input costs',()=>{
   const {context,run}=fixture();
   assert.deepEqual([...run("state.dailyStart='2026-09-20';state.dailyEnd='2026-10-03';costMonthIndexes()")],[8,9]);
-  assert.match(run('costPanel()'),/ยังไม่ได้กรอกต้นทุน/);assert.doesNotMatch(run('costPanel()'),/create-input/);
-  assert.match(run('D.scopes[0].missing=true;costPanel()'),/data-action="create-input" data-dept=""/);run('D.scopes[0].missing=false');
+  assert.equal(run('costPanel()'),'');assert.doesNotMatch(run('dailyDashboard()'),/cost-panel/);
+  assert.match(run('D.scopes[0].missing=true;plSection()'),/data-action="create-input" data-dept=""/);run('D.scopes[0].missing=false');
   const periods=context.window.PL_DATA.scopes[0].periods,W=require('../site/workbook-data.js');
   periods[8].result=W.computeTotals({revenue:1,rm:400000,labor:100000,ohfc:300000});
   periods[9].result=W.computeTotals({revenue:1,rm:100000,ohvc:100000});
