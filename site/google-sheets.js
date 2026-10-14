@@ -204,18 +204,10 @@
     return body;
   }
 
-  function valueAt(row, headers, name) {
-    return row[headers[name]] ?? '';
-  }
-
   function asNumber(value) {
     if (value === '' || value === null || value === undefined) return null;
     const number = typeof value === 'number' ? value : Number(value);
     return Number.isFinite(number) ? number : null;
-  }
-
-  function columnOf(cell) {
-    return String(cell).match(/^[A-Z]+/)?.[0] || '';
   }
 
   function toObjects(rows) {
@@ -238,101 +230,40 @@
     window.PL_SAVED_BY_SCOPE = savedByScope;
   }
 
-  async function loadNativeDataset(metadata, onProgress = () => {}) {
-    const ranges = metadata.sheets.filter(s => ['BP บริษัท A','BP บริษัท A (PD)','Sale Price'].includes(s.properties.title)).map(({properties:p}) => {
-      const cols = Math.min(p.gridProperties.columnCount, p.title === 'Sale Price' ? 17 : 74);
-      return `${quoted(p.title)}!A1:${window.PL_WORKBOOK.columnName(cols-1)}${p.gridProperties.rowCount}`;
-    });
-    const query = new URLSearchParams({includeGridData:'true',fields:'sheets(properties(title),data(startRow,startColumn,rowData(values(effectiveValue))))'});
-    ranges.forEach(range => query.append('ranges',range));
-    const planSheet = metadata.sheets.find(s => s.properties.title === 'business_plans');
-    onProgress({percent:15,message:'กำลังอ่านตาราง P&L จาก Google Sheets…'});
-    const [grid,planRows] = await Promise.all([
-      spreadsheetRequest('?' + query.toString()),
-      planSheet ? sheetValues(`'business_plans'!A1:J${planSheet.properties.gridProperties.rowCount}`) : Promise.resolve([]),
-    ]);
+  // Only Sale Price, the PL Input tab and business_plans are read. Other tabs (manpower detail,
+  // legacy BP sheets) stay in Google Sheets and never reach the browser.
+  async function loadDataset(onProgress = () => {}, year = new Date().getFullYear()) {
+    onProgress({percent:2,message:'กำลังอ่านโครงสร้าง Google Sheets…'});
+    const metadata = await readMetadata();
+    const titles = metadata.sheets.map(s => s.properties.title);
+    if (!titles.includes('Sale Price')) throw new Error('ไม่พบแท็บ Sale Price ในชีต');
+    const inputSheet = window.PL_WORKBOOK.inputSheetName(year);
+    const ranges = [`${quoted('Sale Price')}!A1:Q`];
+    if (titles.includes(inputSheet)) ranges.push(`${quoted(inputSheet)}!A1:AA`);
+    if (titles.includes('business_plans')) ranges.push(`${quoted('business_plans')}!A1:J`);
+    onProgress({percent:15,message:'กำลังอ่าน Sale Price และ PL Input…'});
+    const parts = await sheetBatchValues(ranges);
+    const byTitle = Object.fromEntries(ranges.map((range, i) => [range.slice(1, range.lastIndexOf("'")).replaceAll("''", "'"), parts[i]]));
     onProgress({percent:78,message:'อ่านชีตแล้ว กำลังจัดรูปข้อมูล…'});
-    const dataset = window.PL_WORKBOOK.nativeDataset(metadata,grid.sheets || []);
-    savedPlans(planRows,dataset.year);
+    const dataset = window.PL_WORKBOOK.inputDataset(metadata, {year, saleRows:byTitle['Sale Price'] || [], inputRows:byTitle[inputSheet] || []});
+    savedPlans(byTitle.business_plans || [], year);
     onProgress({percent:94,message:'เตรียมข้อมูล P&L เสร็จแล้ว…'});
     return dataset;
   }
 
-  async function loadDataset(onProgress = () => {}) {
-    onProgress({percent:2,message:'กำลังอ่านโครงสร้าง Google Sheets…'});
-    const sheetMeta = await readMetadata();
-    onProgress({percent:8,message:'อ่านโครงสร้าง Google Sheets แล้ว…'});
-    const titles = sheetMeta.sheets.map(s => s.properties.title);
-    if (titles.some(name => ['BP บริษัท A','BP บริษัท A (PD)'].includes(name))) return loadNativeDataset(sheetMeta,onProgress);
-    if (!titles.includes('pnl') || !titles.includes('accounts')) throw new Error('โครงสร้างชีตไม่ตรงกับตาราง P&L ที่เว็บรองรับ');
-    onProgress({percent:15,message:'กำลังอ่านตาราง P&L และราคาสินค้า…'});
-    const [pnlRows, accountRows, productRows, sourceRows, errorRows, planRows, metadataRows] = await Promise.all([
-      sheetValues('pnl!A1:S'), sheetValues('accounts!A1:F'), sheetValues('products!A1:H'),
-      sheetValues('source_sheets!A1:E'), sheetValues('source_errors!A1:C'),
-      titles.includes('business_plans') ? sheetValues('business_plans!A1:J') : Promise.resolve([]), sheetValues('metadata!A1:B'),
-    ]);
-    onProgress({percent:78,message:'อ่านชีตแล้ว กำลังสรุปข้อมูล…'});
-    const records = toObjects(pnlRows);
-    const accounts = toObjects(accountRows).map(a => ({
-      key: a.account_key, row: asNumber(a.source_row), label: a.account_name_th,
-      en: a.account_name_en, type: a.line_type, order: asNumber(a.account_order),
-    })).sort((a, b) => a.order - b.order);
-    const scopeMap = new Map();
-    for (const record of records) {
-      let scope = scopeMap.get(record.scope_id);
-      if (!scope) {
-        scope = { id: record.scope_id, label: record.scope_name, sheet: record.source_sheet, periods: Array(12) };
-        scopeMap.set(record.scope_id, scope);
-      }
-      const monthIndex = Math.max(0, Number(record.month_index) - 1);
-      let period = scope.periods[monthIndex];
-      if (!period) {
-        period = {
-          month: record.month, bpCol: '', resultCol: '', kind: record.period_type,
-          bp: {}, result: {}, unitsBP: null, unitsResult: null,
-        };
-        scope.periods[monthIndex] = period;
-      }
-      const cellColumn = columnOf(record.source_cell);
-      const target = record.statement_type === 'BP' ? period.bp : period.result;
-      target[record.account_key] = asNumber(record.amount_thb);
-      if (record.statement_type === 'BP') {
-        period.bpCol = cellColumn;
-        period.unitsBP = asNumber(record.unit_count);
-      } else {
-        period.resultCol = cellColumn;
-        period.unitsResult = asNumber(record.unit_count);
-      }
-      period.kind = record.period_type || period.kind;
+  async function createInputSheet(year = window.PL_DATA.year) {
+    const title = window.PL_WORKBOOK.inputSheetName(year);
+    await readMetadata();
+    if (dbMetadata.sheets.some(s => s.properties.title === title)) {
+      // Never write the template over a tab that holds anything: it may contain entered costs.
+      const existing = await sheetValues(`${quoted(title)}!A1:AA40`);
+      if (existing.some(row => row.some(v => v !== '' && v !== null))) return title;
+    } else {
+      await spreadsheetRequest(':batchUpdate', {method:'POST',body:JSON.stringify({requests:[{addSheet:{properties:{title,gridProperties:{rowCount:40,columnCount:27,frozenRowCount:3,frozenColumnCount:3}}}}]})});
     }
-    for (const scope of scopeMap.values()) {
-      scope.periods = scope.periods.map((period, index) => period || {
-        month: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][index],
-        bpCol: '', resultCol: '', kind: 'Forecast', bp: {}, result: {}, unitsBP: null, unitsResult: null,
-      });
-    }
-    const metadata = Object.fromEntries(toObjects(metadataRows).map(row => [row.key, row.value]));
-    savedPlans(planRows,asNumber(metadata.fiscal_year) || 2022);
-    onProgress({percent:94,message:'เตรียมข้อมูล P&L เสร็จแล้ว…'});
-    return {
-      source: metadata.source_file || 'Department P&L Database',
-      year: asNumber(metadata.fiscal_year) || 2022,
-      currency: metadata.currency || 'THB',
-      exchangeBP: asNumber(metadata.exchange_rate_business_plan),
-      exchangeFC: asNumber(metadata.exchange_rate_forecast),
-      rows: accounts,
-      scopes: [...scopeMap.values()],
-      sources: toObjects(sourceRows).map(s => ({
-        name: s.sheet_name, dimension: s.dimensions, hidden: s.is_hidden === true || s.is_hidden === 'TRUE',
-        errors: asNumber(s.error_count) || 0, scope: s.coverage_note,
-      })),
-      errors: toObjects(errorRows).map(e => ({ sheet: e.sheet_name, cell: e.cell, error: e.error_value })),
-      products: toObjects(productRows).map(p => ({
-        model: p.model, description: p.description, priceUSD: asNumber(p.price_usd),
-        rmUSD: asNumber(p.raw_material_usd), bpTHB: asNumber(p.business_plan_thb),
-        fcTHB: asNumber(p.forecast_thb), rmRate: asNumber(p.raw_material_rate), sourceRow: asNumber(p.source_row),
-      })),
-    };
+    const range = encodeURIComponent(`${quoted(title)}!A1`);
+    await spreadsheetRequest(`/values/${range}?valueInputOption=RAW`, {method:'PUT',body:JSON.stringify({values:window.PL_WORKBOOK.inputTemplate(year)})});
+    return title;
   }
 
   async function loadJobOrderShiftTransfers() {
@@ -434,6 +365,7 @@
       window.PL_DB = {
         connected: true,
         savePlan: appendPlan,
+        createInputSheet,
         loadJobOrder,
       };
       setMessage('กำลังเปิดหน้าสรุป…',false,98);
@@ -441,7 +373,7 @@
       document.querySelector('#refresh-data').hidden = false;
       document.querySelector('#connection-status').innerHTML = '<i></i>Google Sheets เชื่อมต่อแล้ว';
       const app = document.createElement('script');
-      app.src = 'app.js?v=20261013j';
+      app.src = 'app.js?v=20261014a';
       app.onload = () => {
         setMessage('โหลดข้อมูลพร้อมแล้ว',false,100);
         setTimeout(()=>{gate.hidden=true;document.querySelector('#main').hidden=false;},220);

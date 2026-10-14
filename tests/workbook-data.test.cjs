@@ -1,35 +1,45 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {MONTHS, DEFINITIONS, decodeGrid, parseScope, parseProducts} = require('../site/workbook-data.js');
+const {MONTHS, INPUT_KEYS, inputTemplate, inputSheetName, parseInputSheet, computeTotals, inputDataset, parseProducts} = require('../site/workbook-data.js');
 
-function fixture() {
-  const rows = Array.from({length:40},()=>[]);
-  const labels = ['REVENUES','Raw material consumed','Direct labour','Overtime direct','Direct labour - SCAN','Overtime direct - SCAN','OH VC','Selling expenses','VC total','CM','OH FC','Admin FC','Center Expenses_แบ่ง 3','Center Expenses_แบ่ง 7','Loss on impairment of assets','FC total','Profit','Other income','Extra','Interest','Tax','Net Profit'];
-  let col=6;
-  MONTHS.forEach((month,i)=>{rows[3][col]=month;rows[4][col]='BP';rows[4][col+2]=i===0?'Actual':'Forecast';rows[1][col]=i+1;rows[1][col+2]=i+2;labels.forEach((label,j)=>{rows[j+6][1]=label;rows[j+6][col]=100+i+j;rows[j+6][col+2]=200+i+j;});col+=4;if(i%3===2){rows[3][col]='Q'+(i+1)/3+"'35";rows[4][col]='BP';rows[4][col+2]='Forecast';labels.forEach((_,j)=>{rows[j+6][col]=999999;rows[j+6][col+2]=999999;});col+=4;}});
-  rows[3][col]='Y2035';rows[4][col]='BP';
-  rows[3][col+7]='Jan';rows[4][col+7]='Target';rows[4][col+9]='Forecast';
+function filledInput(year) {
+  const rows = inputTemplate(year);
+  const header = rows[2], col = name => header.indexOf(name);
+  for (const row of rows.slice(3)) {
+    if (row[0] !== 'revenue') row[col('Jan Actual')] = 10;
+    row[col('Jan BP')] = row[0] === 'revenue' ? 1000 : 20;
+  }
   return rows;
 }
 
-test('monthly columns skip quarters, annual totals and historic Target columns; locate shifted rows',()=>{
-  const scope=parseScope(fixture(),'pd','BP บริษัท A (PD)','PD');
-  assert.equal(scope.year,2035);assert.equal(scope.periods.length,12);
-  assert.deepEqual(scope.periods.map(p=>p.month),MONTHS);
-  assert.equal(scope.periods[3].bpCol,'W');assert.equal(scope.periods[3].resultCol,'Y');
-  assert.equal(scope.periods[0].kind,'Actual');assert.equal(scope.periods[1].kind,'Forecast');
-  assert.equal(scope.periods[11].bp.revenue,111);assert.equal(scope.rowByKey.net,28);
-  assert.equal(scope.periods.reduce((sum,p)=>sum+p.bp.revenue,0),1266);
+test('template lists only hand-entered BP บริษัท A items; subtotals are never input rows',()=>{
+  const rows = inputTemplate(2026);
+  assert.equal(inputSheetName(2026),'PL Input 2026');
+  assert.deepEqual(rows.slice(3).map(r=>r[0]),INPUT_KEYS);
+  for (const key of ['vc','cm','fc','profit','net']) assert.ok(!INPUT_KEYS.includes(key));
+  assert.equal(rows[2].length,27);assert.equal(rows[3][3],'อัตโนมัติ');
 });
-test('blank and spreadsheet errors stay unavailable; zero and full precision stay numeric',()=>{
-  const rows=fixture();rows[6][6]=0;rows[6][8]=123.123456789;rows[7][8]='#REF!';rows[8][8]='';
-  const p=parseScope(rows,'pd','BP บริษัท A (PD)','PD').periods[0];
-  assert.equal(p.bp.revenue,0);assert.equal(p.result.revenue,123.123456789);assert.equal(p.result.rm,null);assert.equal(p.result.labor,null);
+test('totals follow the template formulas and blank items count as zero',()=>{
+  const t = computeTotals({revenue:1000,rm:300,labor:100,ohfc:50,other:20,tax:10});
+  assert.equal(t.vc,400);assert.equal(t.cm,600);assert.equal(t.fc,50);assert.equal(t.profit,550);assert.equal(t.net,560);
+  const empty = computeTotals({revenue:1000});
+  assert.equal(empty.vc,null);assert.equal(empty.cm,null);assert.equal(empty.net,null);
 });
-test('typed Google grid errors retain cell address and diagnostic message',()=>{
-  const g=decodeGrid({properties:{title:'BP'},data:[{startRow:5,startColumn:6,rowData:[{values:[{effectiveValue:{numberValue:0}},{effectiveValue:{errorValue:{type:'REF',message:'Missing source'}}},{}]}]}]});
-  assert.equal(g.rows[5][6],0);assert.equal(g.rows[5][7],'#REF!');assert.equal(g.rows[5][8],null);
-  assert.deepEqual(g.errors,[{sheet:'BP',cell:'H6',error:'#REF!',message:'Missing source'}]);
+test('input sheet: Actual revenue waits for production, costs and BP come from the tab, kinds follow today',()=>{
+  const scope = parseInputSheet(filledInput(2026),2026,new Date(2026,1,15));
+  const jan = scope.periods[0];
+  assert.equal(jan.result.revenue,null);assert.equal(jan.result.rm,10);assert.equal(jan.result.vc,70);
+  assert.equal(jan.bp.revenue,1000);assert.equal(jan.bp.vc,140);assert.equal(jan.bp.cm,860);assert.equal(jan.bp.fc,100);
+  assert.equal(jan.bp.net,860-100+20-60);
+  assert.equal(jan.resultCol,'D');assert.equal(jan.bpCol,'P');assert.equal(scope.rowByKey.revenue,4);
+  assert.deepEqual(scope.periods.map(p=>p.kind).slice(0,3),['Actual','Actual','Forecast']);
+  assert.equal(scope.missing,false);
+});
+test('missing input tab yields an empty PD scope flagged for creation',()=>{
+  const ds = inputDataset({properties:{title:'DB'},spreadsheetId:'x',sheets:[{properties:{title:'Sale Price',sheetId:1,gridProperties:{rowCount:5,columnCount:17}}},{properties:{title:'Manpower',sheetId:2,gridProperties:{rowCount:5,columnCount:5}}}]},{year:2026,saleRows:[[,,,,,,'#REF!']]});
+  assert.equal(ds.inputMissing,true);assert.equal(ds.scopes.length,1);assert.equal(ds.scopes[0].id,'pd');
+  assert.equal(ds.sources.find(s=>s.name==='Manpower').used,false);
+  assert.deepEqual(ds.errors,[{sheet:'Sale Price',cell:'G1',error:'#REF!'}]);
 });
 test('products are joined by SKU instead of row position and retain incomplete BP prices',()=>{
   const rows=Array.from({length:7},()=>[]);
@@ -39,10 +49,6 @@ test('products are joined by SKU instead of row position and retain incomplete B
   const products=parseProducts(rows);assert.equal(products.length,3);
   assert.equal(products[0].model,'SKU-A-S');assert.equal(products[0].fcPriceUSD,20);assert.equal(products[0].rmUSD,null);
   assert.equal(products[1].fcTHB,704);assert.equal(products[2].priceUSD,null);
-});
-test('missing months and required totals fail clearly rather than mapping arbitrary cells',()=>{
-  const rows=fixture();rows[3][6]='Missing';assert.throws(()=>parseScope(rows,'pd','BP','PD'),/12 เดือน/);
-  const noNet=fixture();noNet[27][1]='Unknown';assert.throws(()=>parseScope(noNet,'pd','BP','PD'),/net/);
 });
 test('duplicate BP rows are retained and ambiguous forecast SKU rows are never merged silently',()=>{
   const rows=Array.from({length:8},()=>[]);
