@@ -6,7 +6,7 @@ const source=fs.readFileSync(require.resolve('../site/app.js'),'utf8');
 const prefix=source.split("\n$('#period').innerHTML=")[0];
 function fixture(savedRate){
   const stored=new Map(savedRate===undefined?[]:[['pl-production-fx-v1-fixture',String(savedRate)]]);
-  const data={year:2026,exchangeFC:32,scopes:[{id:'pd'}],products:[
+  const data={year:2026,exchangeFC:32,scopes:[require('../site/workbook-data.js').parseInputSheet(require('../site/workbook-data.js').inputTemplate(2026),2026,new Date(2026,9,14))],inputSheet:'PL Input 2026',rows:require('../site/workbook-data.js').DEFINITIONS.map(([key,label,en,type],order)=>({key,label,en,type,order})),products:[
     {model:'MODEL-A-S',fcTHB:320,fcPriceUSD:10,fcExchangeRate:32,fcTHBSource:'Sale Price · FC USD × Rate',forecastSourceRow:5},
     {model:'FIXED',fcTHB:50,fcPriceUSD:null,fcExchangeRate:32,fcTHBSource:'Sale Price · FC BHT',forecastSourceRow:6},
   ],jobOrder:{status:'loaded',firstDate:'2026-10-01',lastDate:'2026-10-03',records:[
@@ -82,12 +82,26 @@ test('monthly P&L revenue = production qty × FC price; unpriced models are coun
   assert.equal(oct.result.cm,3*320+3*50-100);
   assert.equal(scope.periods[0].result.revenue,0);assert.equal(scope.periods[11].result.revenue,null);
 });
-test('overview reads production for the whole selected month, quarter or year, stopping at today',()=>{
-  const {run}=fixture();const today=run('todayKey'),cap=(start,end)=>end>today&&start<=today?today:end;
-  run("state.page='overview';state.period='9'");
-  assert.deepEqual([...run('activeRange()')],['2026-10-01',cap('2026-10-01','2026-10-31')]);
-  assert.equal(run('chartMode()'),'daily');
-  run("state.period='q1'");assert.deepEqual([...run('activeRange()')],['2026-01-01',cap('2026-01-01','2026-03-31')]);assert.equal(run('dailySummary().qty'),0);
-  run("state.period='year'");assert.deepEqual([...run('activeRange()')],['2026-01-01',cap('2026-01-01','2026-12-31')]);assert.equal(run('chartMode()'),'monthly');
-  assert.equal(run('dailySummary().qty'),10);
+test('overview is the date-range production page and has no period selector or daily toggle',()=>{
+  const {run}=fixture();
+  run("state.page='overview'");
+  assert.deepEqual([...run('activeRange()')],['2026-10-01','2026-10-03']);
+  assert.equal(run('productionView()'),true);assert.equal(run('chartMode()'),'daily');
+  assert.equal(run('overview()'),run('dailyDashboard()'));
+  run("state.page='pnl'");assert.equal(run('productionView()'),false);
+});
+test('cost structure covers the months in the date range, from PL Input costs',()=>{
+  const {context,run}=fixture();
+  assert.deepEqual([...run("state.dailyStart='2026-09-20';state.dailyEnd='2026-10-03';costMonthIndexes()")],[8,9]);
+  assert.match(run('costPanel()'),/ยังไม่ได้กรอกต้นทุน/);assert.doesNotMatch(run('costPanel()'),/create-input/);
+  assert.match(run('D.inputMissing=true;costPanel()'),/data-action="create-input"/);run('D.inputMissing=false');
+  const periods=context.window.PL_DATA.scopes[0].periods,W=require('../site/workbook-data.js');
+  periods[8].result=W.computeTotals({revenue:1,rm:400000,labor:100000,ohfc:300000});
+  periods[9].result=W.computeTotals({revenue:1,rm:100000,ohvc:100000});
+  const html=run('costPanel()');
+  assert.match(html,/กันยายน–ตุลาคม 2026/);assert.match(html,/<svg viewBox="0 0 160 160"/);
+  assert.match(html,/วัตถุดิบ<strong>0\.50<\/strong>/);assert.match(html,/ต้นทุนคงที่<strong>0\.30<\/strong>/);assert.match(html,/ค่าแรงและ OT<strong>0\.10<\/strong>/);
+  periods[9].result=W.computeTotals({revenue:1});
+  const partial=run('costPanel()');assert.match(partial,/วัตถุดิบ<strong>0\.40<\/strong>/);assert.match(partial,/ยังไม่ได้กรอกต้นทุนของ ตุลาคม/);
+  assert.match(run('dailyDashboard()'),/cost-panel/);
 });
