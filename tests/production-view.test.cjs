@@ -149,3 +149,15 @@ test('chart is drawn at the card width, so the sale axis stays inside the frame 
   }
   const tall=run("dailyProductionChart(dailyRecords(),'daily',500,520)");assert.match(tall,/viewBox="0 0 500 520"/);assert.doesNotMatch(tall,/NaN|Infinity/);
 });
+test('freshly read sheet data is merged in place: new department appears and is selected, production data survives',()=>{
+  const {run,context}=fixture(),W=require('../site/workbook-data.js');context.window.PL_WORKBOOK=W;
+  const sheet=(title,i)=>({properties:{title,sheetId:i,gridProperties:{rowCount:5,columnCount:27}}});
+  const sale=[[],[],[],[],[]];sale[0][14]=32;sale[4][10]='MODEL-A';sale[4][12]=10;sale[4][14]=320;
+  context.fresh=W.inputDataset({properties:{title:'DB'},spreadsheetId:'x',sheets:[sheet('Sale Price',1),sheet('PL Input 2026',2),sheet('PL Input 2026 H9',3)]},{year:2026,saleRows:sale,inputRows:{'PL Input 2026 H9':W.inputTemplate(2026,{label:'แผนก H9',auto:false})}});
+  run("mergeDataset(fresh,'d:h9')");
+  assert.deepEqual(run('D.scopes.map(s=>s.id)'),['pd','d:h9']);
+  assert.equal(run('state.scope'),'d:h9');assert.equal(run('D.jobOrder.status'),'loaded');assert.equal(run('D.jobOrder.records.length'),4);
+  assert.equal(run('D.scopes[0].periods[9].result.revenue'),960);
+  run("mergeDataset(fresh,'d:missing')");assert.equal(run('state.scope'),'d:h9');
+  run("state.scope='pd';mergeDataset(fresh)");assert.equal(run('state.scope'),'pd');
+});
