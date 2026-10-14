@@ -53,3 +53,4 @@
 .kpi.is-expanded{display:flex;flex-direction:column;justify-content:center;padding:6vw}
 .kpi.is-expanded .kpi-value{font-size:min(16vw,140px)}
 .kpi.is-expanded .kpi-label,.kpi.is-expanded .kpi-bottom{font-size:clamp(12px,2vw,20px)}
+.section-title{margin:30px 0 14px}.section-title h2{font-size:15px;font-weight:600}.section-title p{font-size:10px;color:#8a97a5;margin-top:3px}
