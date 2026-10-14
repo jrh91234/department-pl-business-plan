@@ -4,13 +4,14 @@ const vm=require('node:vm');
 const fs=require('node:fs');
 const adapter=require('../site/workbook-data.js');
 
-async function connectFixture({withInput=false}={}) {
+async function connectFixture({withInput=false,extra=[]}={}) {
   const elements=new Map(),writes=[],reads=[];
   const element=id=>{if(!elements.has(id))elements.set(id,{hidden:false,disabled:true,style:{},classList:{toggle(){}},setAttribute(){},addEventListener(name,fn){this[name]=fn;}});return elements.get(id);};
   const year=new Date().getFullYear(),inputTitle=`PL Input ${year}`;
   const sheet=(title,id)=>({properties:{title,sheetId:id,gridProperties:{rowCount:50,columnCount:30}}});
   const metadata={spreadsheetId:'fixture-id',properties:{title:'Test workbook'},sheets:[sheet('Sale Price',1),sheet('Manpower',3)]};
   if(withInput)metadata.sheets.push(sheet(inputTitle,4));
+  extra.forEach((name,i)=>metadata.sheets.push(sheet(`${inputTitle} ${name}`,20+i)));
   const sale=[[],[],[],[],[null,'M-S','Model',10,null,330,null,null,null,null,'M',null,10,null,320]];
   let header=[],inputRows=withInput?adapter.inputTemplate(year):[];
   const response=(body,ok=true)=>({ok,status:ok?200:400,json:async()=>body});
@@ -19,7 +20,7 @@ async function connectFixture({withInput=false}={}) {
     if(method!=='GET')writes.push({url:decodeURIComponent(url),method,body:JSON.parse(opts.body)});
     if(uri.pathname.endsWith(':batchUpdate')){const title=JSON.parse(opts.body).requests[0].addSheet.properties.title;metadata.sheets.push(sheet(title,metadata.sheets.length+10));return response({replies:[{}]});}
     if(uri.pathname.endsWith('values:batchGet')){const ranges=uri.searchParams.getAll('ranges');reads.push(...ranges);return response({valueRanges:ranges.map(r=>({values:r.startsWith("'Sale Price'")?sale:r.startsWith("'business_plans'")?(header.length?[header]:[]):inputRows}))});}
-    if(uri.pathname.includes('/values/')){const path=decodeURIComponent(uri.pathname);if(method==='PUT'&&path.includes('business_plans'))header=JSON.parse(opts.body).values[0];if(method==='PUT'&&path.includes('PL Input'))inputRows=JSON.parse(opts.body).values;return response(method==='GET'?{values:path.includes('PL Input')?inputRows:header.length?[header]:[]}:{updates:{updatedRows:1}});}
+    if(uri.pathname.includes('/values/')){const path=decodeURIComponent(uri.pathname);if(method==='PUT'&&path.includes('business_plans'))header=JSON.parse(opts.body).values[0];if(method==='PUT'&&path.includes('PL Input'))inputRows=JSON.parse(opts.body).values;return response(method==='GET'?{values:path.includes('PL Input')?(path.includes('QA')?adapter.inputTemplate(year,{label:'แผนก QA',auto:false}):inputRows):header.length?[header]:[]}:{updates:{updatedRows:1}});}
     return response(structuredClone(metadata));
   };
   class View {setFileIds(){return this;}setMimeTypes(){return this;}setIncludeFolders(){return this;}setSelectFolderEnabled(){return this;}setMode(){return this;}}
@@ -48,6 +49,20 @@ test('creating the input tab writes the template once and never over an existing
   assert.equal(writes.length,2);assert.ok(writes[0].url.endsWith(':batchUpdate'));
   assert.equal(writes[1].method,'PUT');assert.equal(writes[1].body.values[2][3],'Jan Actual');assert.ok(writes[1].url.includes(inputTitle));
   await window.PL_DB.createInputSheet();assert.equal(writes.length,2);
+});
+test('adding a department creates its own tab with a manual-revenue template; bad names are rejected',async()=>{
+  const {window,writes,inputTitle}=await connectFixture({withInput:true});
+  await assert.rejects(window.PL_DB.createInputSheet(window.PL_DATA.year,'PD'),/ไม่ซ้ำกับ PD/);
+  await assert.rejects(window.PL_DB.createInputSheet(window.PL_DATA.year,'a/b'),/ห้ามมี/);
+  assert.equal(writes.length,0);
+  const title=await window.PL_DB.createInputSheet(window.PL_DATA.year,'QA');
+  assert.equal(title,`${inputTitle} QA`);assert.equal(writes.length,2);
+  assert.equal(writes[0].body.requests[0].addSheet.properties.title,title);
+  const values=writes[1].body.values;assert.match(values[0][0],/แผนก QA/);assert.equal(values[3][3],'');
+});
+test('every department tab is read in the same single batch request',async()=>{
+  const {reads}=await connectFixture({withInput:true,extra:['QA']});
+  assert.equal(reads.length,3);assert.ok(reads.some(r=>r.includes('QA')));
 });
 test('a filled input tab is never overwritten',async()=>{
   const {window,writes}=await connectFixture({withInput:true});

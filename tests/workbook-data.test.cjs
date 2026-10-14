@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {MONTHS, INPUT_KEYS, inputTemplate, inputSheetName, parseInputSheet, computeTotals, inputDataset, parseProducts} = require('../site/workbook-data.js');
+const {MONTHS, INPUT_KEYS, inputTemplate, inputSheetName, departmentSheets, parseInputSheet, computeTotals, inputDataset, parseProducts} = require('../site/workbook-data.js');
 
 function filledInput(year) {
   const rows = inputTemplate(year);
@@ -56,4 +56,35 @@ test('duplicate BP rows are retained and ambiguous forecast SKU rows are never m
   Object.assign(rows[5],{1:'SKU-A-S',3:11});
   let products=parseProducts(rows);assert.equal(products.length,2);assert.equal(products[0].priceUSD,10);assert.equal(products[1].priceUSD,11);assert.equal(products[1].fcPriceUSD,20);
   Object.assign(rows[6],{10:'SKU-A',12:21});products=parseProducts(rows);assert.equal(products.length,4);assert.equal(products[0].fcPriceUSD,null);assert.ok(products[0].matchWarning);
+});
+
+test('every PL Input <year> <name> tab is a department; PD is always first and never duplicated',()=>{
+  const d=departmentSheets(['Sale Price','PL Input 2026','PL Input 2026 QA','PL Input 2026 แผนก ขาย','PL Input 2026 pd','PL Input 2025 QA','PL Input 2026 ','PL Input 20260'],2026);
+  assert.deepEqual(d.map(x=>x.id),['pd','d:qa','d:แผนก ขาย']);
+  assert.deepEqual(d.map(x=>x.label),['แผนก PD','แผนก QA','แผนก ขาย']);
+  assert.deepEqual(d.map(x=>x.auto),[true,false,false]);assert.deepEqual(d.map(x=>x.name),['','QA','แผนก ขาย']);
+  assert.equal(departmentSheets([],2026).length,1);
+});
+test('department template: manual revenue and editable names; PD template keeps the automatic marker',()=>{
+  const manual=inputTemplate(2026,{label:'แผนก QA',auto:false}),auto=inputTemplate(2026);
+  assert.match(manual[0][0],/แผนก QA/);assert.equal(manual[3][3],'');assert.equal(auto[3][3],'อัตโนมัติ');
+  assert.equal(manual[2][1],'รายการ (ชื่อที่แสดงบนเว็บ)');
+});
+test('renamed items are read from columns B and C and matching still uses the key column',()=>{
+  const rows=inputTemplate(2026);rows[4][1]='วัตถุดิบ (ใหม่)';rows[4][2]='Renamed material';rows[5][1]='';rows[5][2]='';
+  rows[4][rows[2].indexOf('Jan Actual')]=5;
+  const scope=parseInputSheet(rows,2026,new Date(2026,1,1));
+  assert.deepEqual(scope.labels.rm,{label:'วัตถุดิบ (ใหม่)',en:'Renamed material'});
+  assert.equal(scope.labels.labor,undefined);assert.equal(scope.periods[0].result.rm,5);
+});
+test('manual revenue numbers are kept; the automatic marker stays empty until production fills it',()=>{
+  const rows=inputTemplate(2026);rows[3][rows[2].indexOf('Feb Actual')]=1234;
+  const scope=parseInputSheet(rows,2026,new Date(2026,3,1));
+  assert.equal(scope.periods[0].revenueManual,null);assert.equal(scope.periods[1].revenueManual,1234);assert.equal(scope.periods[1].result.revenue,1234);
+});
+test('dataset reads one scope per department tab and lists each tab as used',()=>{
+  const meta={properties:{title:'DB'},spreadsheetId:'x',sheets:['Sale Price','PL Input 2026','PL Input 2026 QA','Manpower'].map((t,i)=>({properties:{title:t,sheetId:i,gridProperties:{rowCount:5,columnCount:27}}}))};
+  const ds=inputDataset(meta,{year:2026,saleRows:[],inputRows:{'PL Input 2026 QA':inputTemplate(2026,{label:'แผนก QA',auto:false})}});
+  assert.deepEqual(ds.scopes.map(s=>s.id),['pd','d:qa']);assert.equal(ds.scopes[0].missing,true);assert.equal(ds.scopes[1].missing,false);assert.equal(ds.inputMissing,true);
+  assert.deepEqual(ds.sources.filter(s=>s.used).map(s=>s.name),['Sale Price','PL Input 2026','PL Input 2026 QA']);
 });
