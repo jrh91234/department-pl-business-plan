@@ -7,8 +7,9 @@ const prefix=source.split("\n$('#period').innerHTML=")[0];
 function fixture(savedRate){
   const stored=new Map(savedRate===undefined?[]:[['pl-production-fx-v1-fixture',String(savedRate)]]);
   const data={year:2026,exchangeFC:32,scopes:[require('../site/workbook-data.js').parseInputSheet(require('../site/workbook-data.js').inputTemplate(2026),2026,new Date(2026,9,14))],inputSheet:'PL Input 2026',rows:require('../site/workbook-data.js').DEFINITIONS.map(([key,label,en,type],order)=>({key,label,en,type,order})),products:[
-    {model:'MODEL-A-S',fcTHB:320,fcPriceUSD:10,fcExchangeRate:32,fcTHBSource:'Sale Price · FC USD × Rate',forecastSourceRow:5},
-    {model:'FIXED',fcTHB:50,fcPriceUSD:null,fcExchangeRate:32,fcTHBSource:'Sale Price · FC BHT',forecastSourceRow:6},
+    {model:'MODEL-A-S',priceUSD:10,sourceRow:5,fcPriceUSD:99,fcTHB:9999,forecastModel:'MODEL-A',forecastSourceRow:5},
+    {model:'FIXED',priceUSD:1.5625,sourceRow:6},
+    {model:'FC-ONLY',priceUSD:null,sourceRow:null,forecastModel:'FC-ONLY',fcPriceUSD:5,fcTHB:160},
   ],jobOrder:{status:'loaded',firstDate:'2026-10-01',lastDate:'2026-10-03',records:[
     {date:'2026-10-01',time:'08:00',model:'MODEL-A',qty:2,jobNo:'J1'},
     {date:'2026-10-01',time:'09:00',model:'FIXED',qty:3,jobNo:'J2'},
@@ -20,17 +21,24 @@ function fixture(savedRate){
   vm.runInContext("state.dailyStart='2026-10-01';state.dailyEnd='2026-10-03';",context);
   return {context,stored,run:code=>vm.runInContext(code,context)};
 }
-test('Sale total uses matched production quantity and preserves THB-only prices under FX override',()=>{
+test('Sale total is production quantity × BP Process USD × exchange rate; FC prices are never used',()=>{
   const {run}=fixture();
   assert.equal(run('dailySummary().estimatedValue'),1110);
   assert.equal(run('dailySummary().pricedQty'),6);
+  assert.equal(run("priceMatchForModel('MODEL-A').price"),320);
+  assert.equal(run("priceMatchForModel('FC-ONLY')"),null);
   run('fxOverride=35;priceMatchCache.clear()');
-  assert.equal(run('dailySummary().estimatedValue'),1200);
-  assert.equal(run("priceMatchForModel('FIXED').price"),50);
-  assert.match(run("modelPriceNotes('MODEL-A')"),/35 บาท\/USD/);
+  assert.equal(run('dailySummary().estimatedValue'),1214.0625);
+  assert.equal(run("priceMatchForModel('FIXED').price"),54.6875);
+  assert.match(run("modelPriceNotes('MODEL-A')"),/Process USD 10 × Exchange rate 35 บาท\/USD = 350\.00/);
+  assert.match(run("modelPriceNotes('MODEL-A')"),/Sale Price!D5/);
+});
+test('no exchange rate means no price rather than a wrong one',()=>{
+  const {run}=fixture();run('D.exchangeFC=null;priceMatchCache.clear()');
+  assert.equal(run("priceMatchForModel('MODEL-A')"),null);assert.equal(run('dailySummary().pricedQty'),0);
 });
 test('remembered FX is restored on entry; invalid remembered values use sheet rate',()=>{
-  assert.equal(fixture(35).run('dailySummary().estimatedValue'),1200);
+  assert.equal(fixture(35).run('dailySummary().estimatedValue'),1214.0625);
   for(const value of ['bad',0,-1])assert.equal(fixture(value).run('effectiveExchangeRate()'),32);
 });
 test('chart has independent quantity and Sale axes in every granularity; unpriced periods leave a gap',()=>{
@@ -65,10 +73,10 @@ test('saving FX clears cached prices, updates totals, and persists for next visi
   vm.runInContext(listener,context);
   context.submit({target:{id:'exchange-rate-form'},preventDefault(){}});
   assert.equal(stored.get('pl-production-fx-v1-fixture'),'36');
-  assert.equal(run('dailySummary().estimatedValue'),1230);
-  assert.equal(fixture(stored.get('pl-production-fx-v1-fixture')).run('dailySummary().estimatedValue'),1230);
+  assert.equal(run('dailySummary().estimatedValue'),1248.75);
+  assert.equal(fixture(stored.get('pl-production-fx-v1-fixture')).run('dailySummary().estimatedValue'),1248.75);
 });
-test('monthly P&L revenue = production qty × FC price; unpriced models are counted but not valued',()=>{
+test('monthly P&L revenue = production qty × Process USD price; unpriced models are counted but not valued',()=>{
   const {context,run}=fixture();
   const adapter=require('../site/workbook-data.js');
   context.window.PL_WORKBOOK=adapter;
@@ -174,7 +182,7 @@ test('chart is drawn at the card width, so the sale axis stays inside the frame 
 test('freshly read sheet data is merged in place: new department appears and is selected, production data survives',()=>{
   const {run,context}=fixture(),W=require('../site/workbook-data.js');context.window.PL_WORKBOOK=W;
   const sheet=(title,i)=>({properties:{title,sheetId:i,gridProperties:{rowCount:5,columnCount:27}}});
-  const sale=[[],[],[],[],[]];sale[0][14]=32;sale[4][10]='MODEL-A';sale[4][12]=10;sale[4][14]=320;
+  const sale=[[],[],[],[],[]];sale[0][14]=32;sale[4][1]='MODEL-A-S';sale[4][3]=10;
   context.fresh=W.inputDataset({properties:{title:'DB'},spreadsheetId:'x',sheets:[sheet('Sale Price',1),sheet('PL Input 2026',2),sheet('PL Input 2026 QA',3)]},{year:2026,saleRows:sale,inputRows:{'PL Input 2026 QA':W.inputTemplate(2026,{label:'แผนก QA',auto:false})}});
   run("mergeDataset(fresh,'d:qa')");
   assert.deepEqual(run('D.scopes.map(s=>s.id)'),['pd','d:qa']);
@@ -182,4 +190,16 @@ test('freshly read sheet data is merged in place: new department appears and is 
   assert.equal(run('D.scopes[0].periods[9].result.revenue'),960);
   run("mergeDataset(fresh,'d:missing')");assert.equal(run('state.scope'),'d:qa');
   run("state.scope='pd';mergeDataset(fresh)");assert.equal(run('state.scope'),'pd');
+});
+test('a model whose FC rows are duplicated still gets its Process USD price (real Sale Price shape)',()=>{
+  const {run,context}=fixture(),W=require('../site/workbook-data.js');
+  const rows=Array.from({length:8},()=>[]);rows[0][14]=32;
+  Object.assign(rows[4],{1:'EZBOX100-S',3:44.48,5:1467.72,10:'EZBOX100',12:null});
+  Object.assign(rows[5],{10:'EZBOX100',12:44.48});
+  Object.assign(rows[6],{1:'SDVS3100EZ12G/S-S',3:101.78,10:'SDVS3100EZ12G/S',12:101.78,14:3256.85});
+  context.window.PL_DATA.products=W.parseProducts(rows);run('priceMatchCache.clear()');
+  assert.ok(context.window.PL_DATA.products.some(p=>p.matchWarning));
+  assert.equal(run("priceMatchForModel('EZBOX100').price"),44.48*32);
+  assert.equal(run("priceMatchForModel('SDVS3100EZ12G/S').price"),101.78*32);
+  assert.equal(run("priceMatchForModel('SDVS3100EZ12G/S-S').exact"),true);
 });
