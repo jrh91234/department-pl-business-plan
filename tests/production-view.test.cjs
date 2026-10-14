@@ -17,7 +17,7 @@ function fixture(savedRate){
   ]}};
   const context=vm.createContext({window:{PL_DATA:data,PL_CONFIG:{spreadsheetId:'fixture'}},localStorage:{getItem:key=>stored.get(key)||null,setItem:(key,value)=>stored.set(key,value)},Intl,Date,console});
   vm.runInContext(prefix,context);
-  vm.runInContext("state.dailyStart='2026-10-01';state.dailyEnd='2026-10-03';",context);
+  vm.runInContext("state.period='daily';state.dailyStart='2026-10-01';state.dailyEnd='2026-10-03';",context);
   return {context,stored,run:code=>vm.runInContext(code,context)};
 }
 test('Sale total uses matched production quantity and preserves THB-only prices under FX override',()=>{
@@ -81,4 +81,13 @@ test('monthly P&L revenue = production qty × FC price; unpriced models are coun
   assert.equal(oct.result.revenue,3*320+3*50);
   assert.equal(oct.result.cm,3*320+3*50-100);
   assert.equal(scope.periods[0].result.revenue,0);assert.equal(scope.periods[11].result.revenue,null);
+});
+test('overview reads production for the whole selected month, quarter or year, stopping at today',()=>{
+  const {run}=fixture();const today=run('todayKey'),cap=(start,end)=>end>today&&start<=today?today:end;
+  run("state.page='overview';state.period='9'");
+  assert.deepEqual([...run('activeRange()')],['2026-10-01',cap('2026-10-01','2026-10-31')]);
+  assert.equal(run('chartMode()'),'daily');
+  run("state.period='q1'");assert.deepEqual([...run('activeRange()')],['2026-01-01',cap('2026-01-01','2026-03-31')]);assert.equal(run('dailySummary().qty'),0);
+  run("state.period='year'");assert.deepEqual([...run('activeRange()')],['2026-01-01',cap('2026-01-01','2026-12-31')]);assert.equal(run('chartMode()'),'monthly');
+  assert.equal(run('dailySummary().qty'),10);
 });
