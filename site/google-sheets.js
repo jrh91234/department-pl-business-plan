@@ -10,6 +10,7 @@
   const signIn = document.querySelector('#google-signin');
   const rememberedFileKey = 'pl-google-selected-file-v1';
   const rememberedJobOrderFileKey = 'pl-google-job-order-file-v1';
+  const tokenCacheKey = 'pl-google-token-v1';
   let accessToken = null;
   let tokenClient = null;
   let dbMetadata = null;
@@ -63,12 +64,30 @@
         callback: response => {
           if (response.error) return reject(new Error(response.error_description || response.error));
           accessToken = response.access_token;
+          saveSessionToken(accessToken, Number(response.expires_in) || 3600);
           resolve(accessToken);
         },
         error_callback: error => reject(new Error(error.message || 'เข้าสู่ระบบ Google ไม่สำเร็จ')),
       });
       tokenClient.requestAccessToken({ prompt });
     });
+  }
+
+  // The token lives in sessionStorage only: it survives a refresh of this tab, disappears when the tab
+  // closes, and is dropped a couple of minutes before Google expires it (about an hour).
+  function saveSessionToken(token, expiresInSeconds) {
+    try { sessionStorage.setItem(tokenCacheKey, JSON.stringify({ token, expiresAt: Date.now() + expiresInSeconds * 1000 })); } catch { /* Storage may be blocked. */ }
+  }
+
+  function removeSessionToken() {
+    try { sessionStorage.removeItem(tokenCacheKey); } catch { /* Storage may be blocked. */ }
+  }
+
+  function cachedSessionToken() {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(tokenCacheKey) || 'null');
+      return saved?.token && saved.expiresAt - 120000 > Date.now() ? saved.token : null;
+    } catch { return null; }
   }
 
   function readLocal(key) {
@@ -91,6 +110,7 @@
         ...options,
         headers: { ...(options.headers || {}), Authorization: `Bearer ${accessToken}` },
       });
+      if (response.status === 401) removeSessionToken();
       if (response.status !== 429 || attempt >= 4) return response;
       await wait(Math.min(2000 * 2 ** attempt, 30000));
     }
@@ -346,14 +366,19 @@
     finally{jobOrderPromise=null;}
   }
 
-  async function connect({ reuseAuthorization = false } = {}) {
+  async function connect({ reuseAuthorization = false, useCachedToken = false } = {}) {
     let tokenReceived = false;
     signIn.disabled = true;
-    setMessage(reuseAuthorization ? 'กำลังเชื่อมต่อ Google ด้วยสิทธิ์เดิม…' : 'กำลังเข้าสู่ระบบและอ่านข้อมูลจากชีต…');
+    setMessage(useCachedToken ? 'กำลังเปิดข้อมูลต่อจากเดิม…' : reuseAuthorization ? 'กำลังเชื่อมต่อ Google ด้วยสิทธิ์เดิม…' : 'กำลังเข้าสู่ระบบและอ่านข้อมูลจากชีต…');
     try {
       // '' lets Google decide: no UI when the session and consent are still valid, the account chooser
       // otherwise. 'none' can never show UI, so it failed whenever the session needed a click.
-      await requestAccessToken(reuseAuthorization ? '' : 'select_account');
+      if (useCachedToken) {
+        accessToken = cachedSessionToken();
+        if (!accessToken) throw new Error('เซสชันหมดอายุ');
+      } else {
+        await requestAccessToken(reuseAuthorization ? '' : 'select_account');
+      }
       tokenReceived = true;
       if (readLocal(rememberedFileKey) !== config.spreadsheetId) {
         setMessage('เลือกฐานข้อมูล Department P&L Database ใน Google Drive…');
@@ -363,6 +388,8 @@
       if (readLocal(rememberedJobOrderFileKey) !== config.jobOrderSpreadsheetId) {
         setMessage('เลือกไฟล์ barcode record ใน Google Drive เพื่ออ่านแท็บ Log…');
         await selectGoogleSheet(config.jobOrderSpreadsheetId,'barcode record');
+        // Remember it now; otherwise loadJobOrder() would open the picker a second time.
+        writeLocal(rememberedJobOrderFileKey, config.jobOrderSpreadsheetId);
       }
       setMessage('กำลังอ่านข้อมูลจาก Google Sheets…',false,0);
       window.PL_DATA = await loadDataset(progress=>setMessage(progress.message,false,progress.percent));
@@ -387,6 +414,14 @@
       document.body.appendChild(app);
     } catch (error) {
       const reason = error.message ? `: ${error.message}` : '';
+      if (useCachedToken) {
+        // The saved token was refused or expired: forget it and let the user reconnect with one click.
+        removeSessionToken();
+        accessToken = null;
+        setMessage(`เซสชันเดิมหมดอายุ${reason} กดปุ่มเพื่อเชื่อมต่อใหม่`, true);
+        signIn.disabled = false;
+        return;
+      }
       const canReuseFailed = reuseAuthorization && /popup|login|required|401|403|permission|access/i.test(error.message || '');
       if (canReuseFailed) {
         needsAccountPicker = true;
@@ -415,6 +450,8 @@
       setMessage(needsDatabase||needsProduction
         ? `กดปุ่มเพื่อเข้าสู่ระบบและอนุญาตไฟล์${needsDatabase?' Department P&L Database':''}${needsDatabase&&needsProduction?' และ':''}${needsProduction?' barcode record':''} ครั้งแรก`
         : 'เคยเชื่อมต่อแล้ว กดปุ่มเพื่อเปิดข้อมูลด้วยสิทธิ์เดิม โดยไม่ต้องเลือกชีตซ้ำ');
+      // A refresh inside the token's lifetime resumes without any Google popup.
+      if (!needsDatabase && !needsProduction && cachedSessionToken()) connect({ useCachedToken: true });
     }).catch(error => setMessage(error.message, true));
   }
   signIn.addEventListener('click', () => {
