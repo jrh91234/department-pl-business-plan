@@ -203,3 +203,31 @@ test('a model whose FC rows are duplicated still gets its Process USD price (rea
   assert.equal(run("priceMatchForModel('SDVS3100EZ12G/S').price"),101.78*32);
   assert.equal(run("priceMatchForModel('SDVS3100EZ12G/S-S').exact"),true);
 });
+test('unpriced breakdown matches monthly P&L warning, merges model suffixes, and excludes other months and years',()=>{
+  const {run,context}=fixture();context.window.PL_WORKBOOK=require('../site/workbook-data.js');
+  context.window.PL_DATA.jobOrder.records.push(
+    {date:'2026-10-20',model:'UNKNOWN-S',qty:6},
+    {date:'2026-09-01',model:'OTHER',qty:90},
+    {date:'2025-10-01',model:'OLD',qty:100}
+  );
+  run('applyProductionRevenue()');
+  assert.equal(run('unpricedBreakdown().length'),1);
+  assert.equal(run('unpricedBreakdown()[0].qty'),10);
+  assert.equal(run('unpricedBreakdown()[0].qty'),run('D.scopes[0].periods[9].unpricedQty'));
+  assert.match(run('sourceNotice()'),/data-action="unpriced-breakdown"/);
+  const html=run('unpricedBreakdownHTML()');
+  assert.match(html,/UNKNOWN/);assert.match(html,/10 ชิ้น/);assert.doesNotMatch(html,/OTHER|OLD/);
+});
+test('unpriced breakdown explains ambiguous prices and missing exchange rates and escapes model names',()=>{
+  const {run,context}=fixture();
+  context.window.PL_DATA.products.push({model:'MODEL-A',priceUSD:20});
+  context.window.PL_DATA.jobOrder.records.push({date:'2026-10-01',model:'<script>',qty:1});
+  run('priceMatchCache.clear()');
+  assert.match(run('unpricedBreakdownHTML()'),/พบราคาหลายค่า/);
+  assert.match(run('unpricedBreakdownHTML()'),/&lt;script&gt;/);
+  run('D.exchangeFC=null;priceMatchCache.clear()');
+  assert.equal(run('unpricedBreakdown().reduce((sum,g)=>sum+g.qty,0)'),11);
+  assert.match(run('unpricedBreakdownHTML()'),/ไม่มีอัตราแลกเปลี่ยน/);
+  run("state.dailyStart='2026-08-01';state.dailyEnd='2026-08-31'");
+  assert.match(run('unpricedBreakdownHTML()'),/ไม่มีรายการขาดราคา/);
+});
