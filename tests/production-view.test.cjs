@@ -231,3 +231,20 @@ test('unpriced breakdown explains ambiguous prices and missing exchange rates an
   run("state.dailyStart='2026-08-01';state.dailyEnd='2026-08-31'");
   assert.match(run('unpricedBreakdownHTML()'),/ไม่มีรายการขาดราคา/);
 });
+test('ambiguous breakdown lists every competing Process USD price with its source row, rate and converted price',()=>{
+  const {run,context}=fixture();
+  context.window.PL_DATA.products.push({model:'MODEL-A',priceUSD:20,sourceRow:18});
+  run('priceMatchCache.clear()');
+  const html=run('unpricedBreakdownHTML()');
+  assert.match(html,/ราคาที่จับคู่ได้ของ MODEL-A/);
+  assert.match(html,/MODEL-A-S/);
+  assert.match(html,/Process USD 10 × Exchange rate 32 บาท\/USD = 320\.00/);
+  assert.match(html,/Sale Price!D5/);
+  assert.match(html,/Process USD 20 × Exchange rate 32 บาท\/USD = 640\.00/);
+  assert.match(html,/Sale Price!D18/);
+  assert.match(html,/จับคู่ 100\.0%/);
+  assert.match(html,/ยังไม่เลือกใช้ราคา/);
+  assert.equal(run('unpricedBreakdown().reduce((sum,g)=>sum+g.qty,0)'),7);
+  run('fxOverride=35;priceMatchCache.clear()');
+  assert.match(run('unpricedBreakdownHTML()'),/Process USD 20 × Exchange rate 35 บาท\/USD = 700\.00/);
+});
