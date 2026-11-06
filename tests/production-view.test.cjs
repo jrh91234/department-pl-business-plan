@@ -4,7 +4,7 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const source=fs.readFileSync(require.resolve('../site/app.js'),'utf8');
 const prefix=source.split("\n$('#period').innerHTML=")[0];
-function fixture(savedRate){
+function fixture(savedRate,tab=new Map()){
   const stored=new Map(savedRate===undefined?[]:[['pl-production-fx-v1-fixture',String(savedRate)]]);
   const data={year:2026,exchangeFC:32,scopes:[require('../site/workbook-data.js').parseInputSheet(require('../site/workbook-data.js').inputTemplate(2026),2026,new Date(2026,9,14))],inputSheet:'PL Input 2026',rows:require('../site/workbook-data.js').DEFINITIONS.map(([key,label,en,type],order)=>({key,label,en,type,order})),products:[
     {model:'MODEL-A-S',priceUSD:10,sourceRow:5,fcPriceUSD:99,fcTHB:9999,forecastModel:'MODEL-A',forecastSourceRow:5},
@@ -16,10 +16,10 @@ function fixture(savedRate){
     {date:'2026-10-02',time:'08:00',model:'UNKNOWN',qty:4,jobNo:'J3'},
     {date:'2026-10-03',time:'08:00',model:'MODEL-A-S',qty:1,jobNo:'J4'},
   ]}};
-  const context=vm.createContext({window:{PL_DATA:data,PL_CONFIG:{spreadsheetId:'fixture'}},localStorage:{getItem:key=>stored.get(key)||null,setItem:(key,value)=>stored.set(key,value)},Intl,Date,console});
+  const context=vm.createContext({window:{PL_DATA:data,PL_CONFIG:{spreadsheetId:'fixture'}},localStorage:{getItem:key=>stored.get(key)||null,setItem:(key,value)=>stored.set(key,value)},sessionStorage:{getItem:key=>tab.has(key)?tab.get(key):null,setItem:(key,value)=>tab.set(key,String(value)),removeItem:key=>tab.delete(key)},Intl,Date,console});
   vm.runInContext(prefix,context);
   vm.runInContext("state.dailyStart='2026-10-01';state.dailyEnd='2026-10-03';",context);
-  return {context,stored,run:code=>vm.runInContext(code,context)};
+  return {context,stored,tab,run:code=>vm.runInContext(code,context)};
 }
 test('Sale total is production quantity × BP Process USD × exchange rate; FC prices are never used',()=>{
   const {run}=fixture();
@@ -247,4 +247,73 @@ test('ambiguous breakdown lists every competing Process USD price with its sourc
   assert.equal(run('unpricedBreakdown().reduce((sum,g)=>sum+g.qty,0)'),7);
   run('fxOverride=35;priceMatchCache.clear()');
   assert.match(run('unpricedBreakdownHTML()'),/Process USD 20 × Exchange rate 35 บาท\/USD = 700\.00/);
+});
+
+test('the view is saved and restored after a reload of the tab: department, dates, chart mode, detail and scroll',()=>{
+  const first=fixture();
+  first.run("state.dailyStart='2026-09-05';state.dailyEnd='2026-09-20';state.chartGranularity='monthly';state.detail=true;window.scrollY=640;saveView()");
+  const saved=JSON.parse([...first.tab.values()][0]);
+  assert.equal(saved.dailyStart,'2026-09-05');assert.equal(saved.chartGranularity,'monthly');assert.equal(saved.scrollY,640);
+  const second=fixture(undefined,first.tab);
+  second.run('restoreView()');
+  assert.equal(second.run('state.dailyStart'),'2026-09-05');assert.equal(second.run('state.dailyEnd'),'2026-09-20');
+  assert.equal(second.run('state.chartGranularity'),'monthly');assert.equal(second.run('state.detail'),true);
+  assert.equal(second.run('pendingScroll'),640);
+  // the restored scroll position is not overwritten by the initial scroll events before it is applied
+  second.run('window.scrollY=0;saveView()');
+  assert.equal(JSON.parse([...second.tab.values()][0]).scrollY,640);
+});
+test('a damaged or foreign saved view is ignored',()=>{
+  const first=fixture();first.run('saveView()');const key=[...first.tab.keys()][0];
+  for(const bad of ['not json',JSON.stringify({scope:'nope',dailyStart:'x',dailyEnd:'2026-01-01',chartGranularity:'weird',scrollY:'no'}),JSON.stringify({dailyStart:'2026-10-09',dailyEnd:'2026-10-01'})]){
+    first.tab.set(key,bad);
+    const next=fixture(undefined,first.tab);
+    next.run('restoreView()');
+    assert.equal(next.run('state.dailyStart'),'2026-10-01');assert.equal(next.run('state.dailyEnd'),'2026-10-03');
+    assert.equal(next.run('state.chartGranularity'),'daily');assert.equal(next.run('pendingScroll'),null);
+  }
+});
+test('production data: the saved copy is shown at once, then replaced by the fresh read',async()=>{
+  const {context,run}=fixture();
+  const flush=async()=>{for(let i=0;i<10;i++)await new Promise(resolve=>setImmediate(resolve));};
+  const cached={status:'loaded',records:[{date:'2026-10-01',time:'08:00',model:'MODEL-A',qty:1,jobNo:'J1'}],rowCount:1,firstDate:'2026-10-01',lastDate:'2026-10-01'};
+  const fresh={...cached,records:[...cached.records,{date:'2026-10-02',time:'08:00',model:'MODEL-A',qty:4,jobNo:'J2'}],rowCount:2,lastDate:'2026-10-02'};
+  let release;const gate=new Promise(resolve=>{release=resolve;});
+  context.window.PL_DB={readCachedJobOrder:async()=>cached,loadJobOrder:async()=>{await gate;return fresh;}};
+  context.window.PL_WORKBOOK=require('../site/workbook-data.js');
+  run("render=()=>{};toast=()=>{};D.jobOrder={status:'not-loaded',records:[],rowCount:0};startJobOrderLoad()");
+  await flush();
+  assert.equal(run('D.jobOrder.stale'),true);assert.equal(run('D.jobOrder.records.length'),1);
+  assert.match(run('dailyDashboard()'),/แสดงข้อมูลที่จำไว้ · กำลังอัปเดต/);
+  release();await flush();
+  assert.equal(run('D.jobOrder.stale'),undefined);assert.equal(run('D.jobOrder.records.length'),2);
+  assert.doesNotMatch(run('dailyDashboard()'),/แสดงข้อมูลที่จำไว้/);
+});
+test('production data: if the fresh read fails the saved copy stays visible and says it is not updated',async()=>{
+  const {context,run}=fixture();
+  const flush=async()=>{for(let i=0;i<10;i++)await new Promise(resolve=>setImmediate(resolve));};
+  const cached={status:'loaded',records:[{date:'2026-10-01',time:'08:00',model:'MODEL-A',qty:1,jobNo:'J1'}],rowCount:1,firstDate:'2026-10-01',lastDate:'2026-10-01'};
+  context.window.PL_DB={readCachedJobOrder:async()=>cached,loadJobOrder:async()=>{throw new Error('offline');}};
+  context.window.PL_WORKBOOK=require('../site/workbook-data.js');
+  run("render=()=>{};toasts=[];toast=m=>toasts.push(m);D.jobOrder={status:'not-loaded',records:[],rowCount:0};startJobOrderLoad()");
+  await flush();
+  assert.equal(run('D.jobOrder.status'),'loaded');assert.equal(run('D.jobOrder.stale'),false);assert.equal(run('D.jobOrder.records.length'),1);
+  assert.match(run('toasts[0]'),/offline/);
+});
+test('without a saved copy the load behaves as before (progress, then data or error)',async()=>{
+  const {context,run}=fixture();
+  const flush=async()=>{for(let i=0;i<10;i++)await new Promise(resolve=>setImmediate(resolve));};
+  context.window.PL_DB={readCachedJobOrder:async()=>null,loadJobOrder:async()=>{throw new Error('no access');}};
+  run("render=()=>{};D.jobOrder={status:'not-loaded',records:[],rowCount:0};startJobOrderLoad()");
+  await flush();
+  assert.equal(run('D.jobOrder.status'),'unavailable');assert.match(run('D.jobOrder.error'),/no access/);
+});
+test('a background refresh does not wipe plan edits that are not saved yet',()=>{
+  const {run,context}=fixture(),W=require('../site/workbook-data.js');context.window.PL_WORKBOOK=W;
+  const sheet=(title,i)=>({properties:{title,sheetId:i,gridProperties:{rowCount:5,columnCount:27}}});
+  context.fresh=W.inputDataset({properties:{title:'DB'},spreadsheetId:'x',sheets:[sheet('Sale Price',1),sheet('PL Input 2026',2)]},{year:2026});
+  run("state.assumptions.volume=12;state.dirty=true;mergeDataset(fresh)");
+  assert.equal(run('state.assumptions.volume'),12);
+  run("state.dirty=false;mergeDataset(fresh)");
+  assert.equal(run('state.assumptions.volume'),0);
 });
