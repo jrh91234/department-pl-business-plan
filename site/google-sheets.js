@@ -81,7 +81,46 @@
 
   function removeSessionToken() {
     try { sessionStorage.removeItem(tokenCacheKey); } catch { /* Storage may be blocked. */ }
+    clearDataCaches();
   }
+
+  // Loaded data is kept in sessionStorage (this tab only, compressed) next to the token, so a reload or a
+  // browser-discarded tab can show it at once and refresh in the background. It is only read while the saved
+  // token is still valid, and it is removed together with the token, so nothing is shown without a live sign-in.
+  const dataCachePrefix = 'pl-cache-v1:';
+  async function packJSON(value) {
+    const text = JSON.stringify(value);
+    try {
+      if (typeof CompressionStream === 'function') {
+        const bytes = new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        return 'z:' + btoa(binary);
+      }
+    } catch { /* fall back to plain JSON */ }
+    return 'j:' + text;
+  }
+  async function unpackJSON(packed) {
+    if (packed.startsWith('j:')) return JSON.parse(packed.slice(2));
+    const bytes = Uint8Array.from(atob(packed.slice(2)), c => c.charCodeAt(0));
+    return JSON.parse(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text());
+  }
+  async function saveDataCache(name, identity, value) {
+    try { sessionStorage.setItem(dataCachePrefix + name, JSON.stringify({ identity, savedAt: Date.now(), data: await packJSON(value) })); }
+    catch { /* quota or blocked storage: simply no cache */ }
+  }
+  async function readDataCache(name, identity) {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(dataCachePrefix + name) || 'null');
+      if (!saved || saved.identity !== identity || !cachedSessionToken()) return null;
+      return await unpackJSON(saved.data);
+    } catch { return null; }
+  }
+  function clearDataCaches() {
+    try { ['dataset', 'joborder'].forEach(name => sessionStorage.removeItem(dataCachePrefix + name)); } catch { /* ignore */ }
+  }
+  const datasetIdentity = () => `${config.spreadsheetId}|${new Date().getFullYear()}`;
+  const jobOrderIdentity = () => `${config.jobOrderSpreadsheetId}|${config.jobOrderSheetName}`;
 
   function cachedSessionToken() {
     try {
@@ -267,6 +306,7 @@
     const dataset = window.PL_WORKBOOK.inputDataset(metadata, {year, saleRows:byTitle['Sale Price'] || [], inputRows:Object.fromEntries(inputSheets.map(title => [title, byTitle[title] || []]))});
     savedPlans(byTitle.business_plans || [], year);
     onProgress({percent:94,message:'เตรียมข้อมูล P&L เสร็จแล้ว…'});
+    saveDataCache('dataset', datasetIdentity(), dataset);
     return dataset;
   }
 
@@ -351,7 +391,8 @@
 
   let jobOrderPromise=null;
   async function loadJobOrder(onProgress=()=>{}) {
-    if(window.PL_DATA?.jobOrder?.status==='loaded')return window.PL_DATA.jobOrder;
+    const current=window.PL_DATA?.jobOrder;
+    if(current?.status==='loaded'&&!current.stale)return current;
     if(jobOrderPromise)return jobOrderPromise;
     jobOrderPromise=(async()=>{
       if(readLocal(rememberedJobOrderFileKey)!==config.jobOrderSpreadsheetId){
@@ -359,6 +400,7 @@
         writeLocal(rememberedJobOrderFileKey,config.jobOrderSpreadsheetId);
       }
       const data=await loadJobOrderDataset(onProgress);
+      saveDataCache('joborder', jobOrderIdentity(), data);
       return data;
     })();
     try{return await jobOrderPromise;}
@@ -392,13 +434,16 @@
         writeLocal(rememberedJobOrderFileKey, config.jobOrderSpreadsheetId);
       }
       setMessage('กำลังอ่านข้อมูลจาก Google Sheets…',false,0);
-      window.PL_DATA = await loadDataset(progress=>setMessage(progress.message,false,progress.percent));
+      // A reload inside the token's lifetime opens from the saved copy; the page refreshes it in the background.
+      const cachedDataset = useCachedToken ? await readDataCache('dataset', datasetIdentity()) : null;
+      window.PL_DATA = cachedDataset ? { ...cachedDataset, fromCache: true } : await loadDataset(progress=>setMessage(progress.message,false,progress.percent));
       window.PL_DATA.jobOrder = {status:'not-loaded',records:[],rowCount:0,firstDate:'',lastDate:'',loadedAt:''};
       window.PL_DB = {
         connected: true,
         savePlan: appendPlan,
         createInputSheet,
         reloadDataset: () => loadDataset(() => {}, window.PL_DATA.year),
+        readCachedJobOrder: () => readDataCache('joborder', jobOrderIdentity()),
         loadJobOrder,
       };
       setMessage('กำลังเปิดหน้าสรุป…',false,98);
@@ -406,7 +451,7 @@
       document.querySelector('#refresh-data').hidden = false;
       document.querySelector('#connection-status').innerHTML = '<i></i>Google Sheets เชื่อมต่อแล้ว';
       const app = document.createElement('script');
-      app.src = 'app.js?v=20261014l';
+      app.src = 'app.js?v=20261106a';
       app.onload = () => {
         setMessage('โหลดข้อมูลพร้อมแล้ว',false,100);
         setTimeout(()=>{gate.hidden=true;document.querySelector('#main').hidden=false;},220);
@@ -452,6 +497,7 @@
         ? `กดปุ่มเพื่อเข้าสู่ระบบและอนุญาตไฟล์${needsDatabase?' Department P&L Database':''}${needsDatabase&&needsProduction?' และ':''}${needsProduction?' barcode record':''} ครั้งแรก`
         : 'เคยเชื่อมต่อแล้ว กดปุ่มเพื่อเปิดข้อมูลด้วยสิทธิ์เดิม โดยไม่ต้องเลือกชีตซ้ำ');
       // A refresh inside the token's lifetime resumes without any Google popup.
+      if (!cachedSessionToken()) clearDataCaches();
       if (!needsDatabase && !needsProduction && cachedSessionToken()) connect({ useCachedToken: true });
     }).catch(error => setMessage(error.message, true));
   }

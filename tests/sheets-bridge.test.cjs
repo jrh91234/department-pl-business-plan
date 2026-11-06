@@ -4,7 +4,8 @@ const vm=require('node:vm');
 const fs=require('node:fs');
 const adapter=require('../site/workbook-data.js');
 
-async function connectFixture({withInput=false,extra=[],session=new Map(),click=true,badToken=false,expiresIn,expectConnected=false}={}) {
+async function settled(session,key){for(let i=0;i<200&&!session.has(key);i++)await new Promise(resolve=>setTimeout(resolve,5));assert.ok(session.has(key),'expected '+key);}
+async function connectFixture({withInput=false,extra=[],session=new Map(),click=true,badToken=false,expiresIn,expectConnected=false,withLog=false}={}) {
   const elements=new Map(),writes=[],reads=[];
   const element=id=>{if(!elements.has(id))elements.set(id,{hidden:false,disabled:true,style:{},classList:{toggle(){}},setAttribute(){},addEventListener(name,fn){this[name]=fn;}});return elements.get(id);};
   const year=new Date().getFullYear(),inputTitle=`PL Input ${year}`;
@@ -12,6 +13,8 @@ async function connectFixture({withInput=false,extra=[],session=new Map(),click=
   const metadata={spreadsheetId:'fixture-id',properties:{title:'Test workbook'},sheets:[sheet('Sale Price',1),sheet('Manpower',3)]};
   if(withInput)metadata.sheets.push(sheet(inputTitle,4));
   extra.forEach((name,i)=>metadata.sheets.push(sheet(`${inputTitle} ${name}`,20+i)));
+  if(withLog)metadata.sheets.push({properties:{title:'Log',sheetId:99,gridProperties:{rowCount:2,columnCount:8}}});
+  const logRows=[['Date/Time','Job Order','Model','Barcode','Status','Line','ScanGroupID'],['2026-10-01 09:00:00','J1','MODEL-A','B1','OK','L1','G1']];
   const sale=[[],[],[],[],[null,'M-S','Model',10,null,330,null,null,null,null,'M',null,10,null,320]];
   let header=[],inputRows=withInput?adapter.inputTemplate(year):[];
   const response=(body,ok=true)=>({ok,status:ok?200:400,json:async()=>body});
@@ -20,7 +23,7 @@ async function connectFixture({withInput=false,extra=[],session=new Map(),click=
     if(badToken)return {ok:false,status:401,json:async()=>({error:{message:'Invalid Credentials'}})};
     if(method!=='GET')writes.push({url:decodeURIComponent(url),method,body:JSON.parse(opts.body)});
     if(uri.pathname.endsWith(':batchUpdate')){const title=JSON.parse(opts.body).requests[0].addSheet.properties.title;metadata.sheets.push(sheet(title,metadata.sheets.length+10));return response({replies:[{}]});}
-    if(uri.pathname.endsWith('values:batchGet')){const ranges=uri.searchParams.getAll('ranges');reads.push(...ranges);return response({valueRanges:ranges.map(r=>({values:r.startsWith("'Sale Price'")?sale:r.startsWith("'business_plans'")?(header.length?[header]:[]):inputRows}))});}
+    if(uri.pathname.endsWith('values:batchGet')){const ranges=uri.searchParams.getAll('ranges');reads.push(...ranges);return response({valueRanges:ranges.map(r=>({values:r.startsWith("'Log'")?logRows:r.startsWith("'Sale Price'")?sale:r.startsWith("'business_plans'")?(header.length?[header]:[]):inputRows}))});}
     if(uri.pathname.includes('/values/')){const path=decodeURIComponent(uri.pathname);if(method==='PUT'&&path.includes('business_plans'))header=JSON.parse(opts.body).values[0];if(method==='PUT'&&path.includes('PL Input'))inputRows=JSON.parse(opts.body).values;return response(method==='GET'?{values:path.includes('PL Input')?(path.includes('QA')?adapter.inputTemplate(year,{label:'แผนก QA',auto:false}):inputRows):header.length?[header]:[]}:{updates:{updatedRows:1}});}
     return response(structuredClone(metadata));
   };
@@ -31,10 +34,10 @@ async function connectFixture({withInput=false,extra=[],session=new Map(),click=
   const window={PL_CONFIG:{googleClientId:'fixture',googleApiKey:'fixture',googleProjectNumber:'fixture',spreadsheetId:'fixture-id',jobOrderSpreadsheetId:'fixture-id',jobOrderSheetName:'Log'},PL_WORKBOOK:adapter,gapi:{load:(name,opts)=>opts.callback()},google:{accounts:{oauth2:{initTokenClient:opts=>({requestAccessToken:req=>{prompts.push(req.prompt);opts.callback({access_token:'fixture-token',expires_in:expiresIn});}})}},picker:{DocsView:View,PickerBuilder:Picker,ViewId:{SPREADSHEETS:'sheets'},DocsViewMode:{LIST:'list'},Action:{PICKED:'picked',CANCEL:'cancel'}}}};
   const document={querySelector:element,createElement:()=>({}),head:{appendChild:s=>s.onload()},body:{appendChild(){}}};
   const localStorage={getItem:k=>stored.get(k)??null,setItem:(k,v)=>stored.set(k,String(v)),removeItem:k=>stored.delete(k)};
-  vm.runInNewContext(fs.readFileSync(require.resolve('../site/google-sheets.js'),'utf8'),{window,document,fetch,localStorage,sessionStorage:tabStorage,setTimeout,URL,URLSearchParams,Intl,crypto:require('node:crypto').webcrypto,location:{reload(){}}});
+  vm.runInNewContext(fs.readFileSync(require.resolve('../site/google-sheets.js'),'utf8'),{window,document,fetch,localStorage,sessionStorage:tabStorage,Blob,Response,CompressionStream,DecompressionStream,btoa,atob,Uint8Array,setTimeout,URL,URLSearchParams,Intl,crypto:require('node:crypto').webcrypto,location:{reload(){}}});
   await new Promise(resolve=>setImmediate(resolve));
   if(click)element('#google-signin').click();
-  for(let i=0;i<200&&!window.PL_DB&&element('#google-signin').disabled;i++)await new Promise(resolve=>setImmediate(resolve));
+  for(let i=0;i<400&&!window.PL_DB&&element('#google-signin').disabled;i++)await new Promise(resolve=>setTimeout(resolve,5));
   if(click||expectConnected)assert.ok(window.PL_DB?.connected,element('#connect-message-text').textContent);
   return {window,writes,reads,prompts,element,session,inputTitle,setHeader:value=>header=value,reconnect:async()=>{element('#google-signin').click();for(let i=0;i<50;i++)await new Promise(resolve=>setImmediate(resolve));}};
 }
@@ -78,14 +81,50 @@ test('refreshing inside the token lifetime reopens the data with no Google popup
   const second=await connectFixture({withInput:true,session:first.session,click:false,expectConnected:true});
   assert.ok(second.window.PL_DB?.connected);assert.deepEqual(second.prompts,[]);
 });
-test('an expired or refused saved token is dropped and the button is offered again',async()=>{
+test('an expired saved token is ignored: no popup, no saved data used, button offered',async()=>{
   const first=await connectFixture({withInput:true,expiresIn:60});
+  await settled(first.session,'pl-cache-v1:dataset');
   const expired=await connectFixture({withInput:true,session:first.session,click:false});
   assert.ok(!expired.window.PL_DB);assert.deepEqual(expired.prompts,[]);
+  assert.ok(!expired.session.has('pl-cache-v1:dataset'));
+});
+test('a refused saved token is dropped together with the saved data as soon as Google answers 401',async()=>{
   const fresh=await connectFixture({withInput:true});
-  const refused=await connectFixture({withInput:true,session:fresh.session,click:false,badToken:true});
-  assert.ok(!refused.window.PL_DB?.connected);assert.ok(!refused.session.has('pl-google-token-v1'));
-  assert.equal(refused.element('#google-signin').disabled,false);assert.match(refused.element('#connect-message-text').textContent,/เซสชันเดิมหมดอายุ/);
+  await settled(fresh.session,'pl-cache-v1:dataset');
+  const refused=await connectFixture({withInput:true,session:fresh.session,click:false,badToken:true,expectConnected:true});
+  assert.ok(refused.session.has('pl-google-token-v1'));
+  await assert.rejects(refused.window.PL_DB.reloadDataset(),/Invalid Credentials/);
+  assert.ok(!refused.session.has('pl-google-token-v1'));assert.ok(!refused.session.has('pl-cache-v1:dataset'));
+});
+test('a reload inside the token lifetime opens from the saved copy without reading Sheets',async()=>{
+  const first=await connectFixture({withInput:true,extra:['QA']});
+  await settled(first.session,'pl-cache-v1:dataset');
+  const second=await connectFixture({withInput:true,extra:['QA'],session:first.session,click:false,expectConnected:true});
+  assert.equal(second.reads.length,0);assert.deepEqual(second.prompts,[]);
+  assert.equal(second.window.PL_DATA.fromCache,true);
+  assert.equal(second.window.PL_DATA.scopes.map(x=>x.id).join(),'pd,d:qa');
+  assert.equal(second.window.PL_DATA.year,first.window.PL_DATA.year);
+});
+test('the barcode Log copy is kept for the tab and a stale copy never blocks the fresh read',async()=>{
+  const first=await connectFixture({withInput:true,withLog:true});
+  const loaded=await first.window.PL_DB.loadJobOrder();
+  assert.equal(loaded.status,'loaded');assert.equal(loaded.records.length,1);
+  await settled(first.session,'pl-cache-v1:joborder');
+  const second=await connectFixture({withInput:true,withLog:true,session:first.session,click:false,expectConnected:true});
+  const cached=await second.window.PL_DB.readCachedJobOrder();
+  assert.equal(cached.status,'loaded');assert.equal(cached.records.length,1);assert.equal(cached.records[0].model,'MODEL-A');
+  second.window.PL_DATA.jobOrder={...cached,stale:true};
+  const before=second.reads.length;
+  const fresh=await second.window.PL_DB.loadJobOrder();
+  assert.ok(second.reads.length>before,'stale copy must trigger a real read');assert.equal(fresh.records.length,1);
+});
+test('saved data is only used with the same files and year',async()=>{
+  const first=await connectFixture({withInput:true});
+  await settled(first.session,'pl-cache-v1:dataset');
+  const saved=JSON.parse(first.session.get('pl-cache-v1:dataset'));saved.identity='other-sheet|2020';
+  first.session.set('pl-cache-v1:dataset',JSON.stringify(saved));
+  const second=await connectFixture({withInput:true,session:first.session,click:false,expectConnected:true});
+  assert.ok(second.reads.length>0);assert.ok(!second.window.PL_DATA.fromCache);
 });
 test('a filled input tab is never overwritten',async()=>{
   const {window,writes}=await connectFixture({withInput:true});
